@@ -1,0 +1,247 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model Project {
+  id            String   @id @default(uuid())
+  name          String
+  description   String?
+  core_version  String?
+  modules       String?
+  configuration String?
+  created_date  DateTime @default(now())
+  updated_date  DateTime @updatedAt
+}
+
+model Module {
+  id           String   @id @default(uuid())
+  module_key   String
+  name         String
+  version      String
+  description  String?
+  core_version String?
+  category     String?
+  status       String?
+  lifecycle    String?
+  features     String?
+  use_cases    String?
+  data_sources  String?
+  dependencies  String?
+  configuration String?
+  capabilities  String?
+  endpoints     String?
+  created_date DateTime @default(now())
+  updated_date DateTime @updatedAt
+}
+
+model AIExecution {
+  id                String   @id @default(uuid())
+  project_id        String?
+  project_name      String?
+  use_case          String?
+  provider          String?
+  model             String?
+  status            String?
+  prompt_name       String?
+  prompt_version    String?
+  module_name       String?
+  execution_time    Int?
+  user_name         String?
+  error             String?
+  context_reference String?
+  input_reference   String?
+  output            String?
+  created_date      DateTime @default(now())
+}
+
+model Risk {
+  id           String   @id @default(uuid())
+  project_name String?
+  module_name  String?
+  score        Int?
+  status       String?
+  created_date DateTime @default(now())
+}
+
+model AuditEvent {
+  id           String   @id @default(uuid())
+  action       String?
+  project_id   String?
+  project_name String?
+  user_name    String?
+  user_id      String?
+  module_name  String?
+  module_id    String?
+  use_case     String?
+  entity_type  String?
+  entity_id    String?
+  new_value    String?
+  created_date DateTime @default(now())
+}
+
+model Prompt {
+  id            String   @id @default(uuid())
+  name          String?
+  use_case      String?
+  module_id     String?
+  project_id    String?
+  version       String?
+  description   String?
+  instructions  String?
+  input_schema  String?
+  output_schema String?
+  variables     String?
+  status        String?
+  created_date  DateTime @default(now())
+  updated_date  DateTime @updatedAt
+}
+
+model ApiKey {
+  id            String   @id @default(uuid())
+  name          String?
+  key           String?
+  masked_key    String?
+  prefix        String?
+  project_id    String?
+  environment   String?
+  scopes        String?
+  status        String?
+  expires_at    String?
+  created_date  DateTime @default(now())
+  updated_date  DateTime @updatedAt
+}
+
+model KnowledgeBase {
+  id               String   @id @default(uuid())
+  name             String?
+  description      String?
+  project_id       String?
+  module_id        String?
+  vector_store     String?
+  embedding_model  String?
+  chunk_size       Int?
+  chunk_overlap    Int?
+  status           String?
+  documents_count  Int?
+  embeddings_count Int?
+  created_date     DateTime @default(now())
+  updated_date     DateTime @updatedAt
+}
+
+model Document {
+  id                String   @id @default(uuid())
+  name              String?
+  knowledge_base_id String?
+  kb_id             String?
+  type              String?
+  source            String?
+  size              Int?
+  status            String?
+  content           String?
+  metadata          String?
+  chunks            String?
+  chunk_count       Int?
+  created_date      DateTime @default(now())
+  updated_date      DateTime @updatedAt
+}
+
+model AiProvider {
+  id               String   @id @default(uuid())
+  name             String?
+  type             String?
+  endpoint_url     String?
+  provider_key     String?
+  base_url         String?
+  api_key          String?
+  secret_hash      String?
+  status           String?
+  last_test_status String?
+  is_default       Boolean?
+  api_key_set      Boolean?
+  created_date     DateTime @default(now())
+  updated_date     DateTime @updatedAt
+}
+
+model AiModel {
+  id                String   @id @default(uuid())
+  name              String?
+  model_id          String?
+  model_key         String?
+  provider_id       String?
+  provider_name     String?
+  type              String?
+  version           String?
+  context_window    Int?
+  max_tokens        Int?
+  max_output_tokens Int?
+  temperature       Float?
+  capabilities      String?
+  status            String?
+  created_date      DateTime @default(now())
+  updated_date      DateTime @updatedAt
+}
+
+model AiPolicy {
+  id                        String   @id @default(uuid())
+  name                      String?
+  scope                     String?
+  scope_ref                 String?
+  description               String?
+  strict_mode               Boolean?
+  max_tokens                Int?
+  max_execution_time        Int?
+  temperature_max           Float?
+  max_cost_per_month        Float?
+  allowed_models            String?
+  fallback_model_id         String?
+  rag_required              Boolean?
+  human_validation_required Boolean?
+  status                    String?
+  created_date              DateTime @default(now())
+  updated_date              DateTime @updatedAt
+}
+
+model CoreVersion {
+  id           String   @id @default(uuid())
+  version      String?
+  release_date String?
+  status       String?
+  changelog    String?
+  is_latest    Boolean?
+  created_date DateTime @default(now())
+  updated_date DateTime @updatedAt
+}
+
+model CoreSettings {
+  id                        String   @id @default(uuid())
+  default_provider          String?
+  default_model_id          String?
+  default_model_name        String?
+  default_embedding_model   String?
+  default_vector_store      String?
+  default_temperature       Float?
+  default_token_limit       Int?
+  default_rag_strategy      String?
+  default_validation_policy String?
+  current_core_version      String?
+  created_date              DateTime @default(now())
+  updated_date              DateTime @updatedAt
+}
+
+model ApiLog {
+  id           String   @id @default(uuid())
+  request_id   String?
+  project_id   String?
+  endpoint     String?
+  method       String?
+  status_code  Int?
+  duration     Int?
+  user_id      String?
+  created_date DateTime @default(now())
+  updated_date DateTime @updatedAt
+}
