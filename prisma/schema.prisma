@@ -56,13 +56,17 @@ model AIExecution {
   context_reference String?
   input_reference   String?
   output            String?
+  human_validation  String?
   created_date      DateTime @default(now())
 }
 
 model Risk {
   id           String   @id @default(uuid())
+  project_id   String?
   project_name String?
+  module_id    String?
   module_name  String?
+  use_case     String?
   score        Int?
   status       String?
   created_date DateTime @default(now())
@@ -80,7 +84,9 @@ model AuditEvent {
   use_case     String?
   entity_type  String?
   entity_id    String?
+  old_value    String?
   new_value    String?
+  comment      String?
   created_date DateTime @default(now())
 }
 
@@ -102,18 +108,22 @@ model Prompt {
 }
 
 model ApiKey {
-  id            String   @id @default(uuid())
-  name          String?
-  key           String?
-  masked_key    String?
-  prefix        String?
-  project_id    String?
-  environment   String?
-  scopes        String?
-  status        String?
-  expires_at    String?
-  created_date  DateTime @default(now())
-  updated_date  DateTime @updatedAt
+  id                 String    @id @default(uuid())
+  name               String?
+  project_id         String?
+  project_name       String?
+  key_prefix         String?
+  secret_hash        String?
+  status             String?
+  environment        String?
+  scopes             String?
+  expires_at         String?
+  rate_limit_per_min Int?
+  rate_limit_per_day Int?
+  created_by_name    String?
+  last_used_at       DateTime?
+  created_date       DateTime  @default(now())
+  updated_date       DateTime  @updatedAt
 }
 
 model KnowledgeBase {
