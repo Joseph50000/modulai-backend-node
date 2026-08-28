@@ -57,6 +57,8 @@ model AIExecution {
   input_reference   String?
   output            String?
   human_validation  String?
+  justification     String?
+  resources_used    String?
   created_date      DateTime @default(now())
 }
 

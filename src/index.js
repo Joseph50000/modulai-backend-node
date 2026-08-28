@@ -3,7 +3,8 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import authRoutes from './routes/auth.js';
 import entityRoutes from './routes/entities.js';
-
+import aiRoutes from './routes/ai.js';
+import gatewayRoutes from './routes/gateway.js';
 dotenv.config();
 
 const app = express();
@@ -17,8 +18,14 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', service: 'modulai-backend' });
 });
 
-// Routes API
+// Routes API internes
 app.use('/api/auth', authRoutes);
+app.use('/api/ai', aiRoutes);
+
+// Gateway dynamique pour les endpoints des modules
+app.use('/api/dynamic', gatewayRoutes);
+
+// Generic CRUD API (doit être en dernier pour ne pas intercepter les autres)
 app.use('/api', entityRoutes);
 
 app.listen(PORT, () => {
