@@ -3,7 +3,7 @@ import express from 'express';
 
 const router = express.Router();
 
-const AI_CORE_URL = process.env.AI_CORE_URL || 'http://localhost:8001';
+const AI_CORE_URL = (process.env.AI_CORE_URL || 'http://localhost:8001').replace(/\/$/, '');
 
 router.post('/execute', async (req, res) => {
   try {

@@ -4,7 +4,7 @@ import { PrismaClient } from '@prisma/client';
 const router = express.Router();
 const prisma = new PrismaClient();
 
-const AI_CORE_URL = process.env.AI_CORE_URL || 'http://localhost:8001';
+const AI_CORE_URL = (process.env.AI_CORE_URL || 'http://localhost:8001').replace(/\/$/, '');
 
 // Intercepte toutes les requêtes dynamiques
 router.all('/*', async (req, res) => {

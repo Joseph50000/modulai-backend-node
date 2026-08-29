@@ -4,7 +4,9 @@
   "type": "module",
   "main": "src/index.js",
   "scripts": {
+    "predev": "prisma db push --accept-data-loss",
     "dev": "nodemon --ignore mock_db.json src/index.js",
+    "prestart": "prisma db push --accept-data-loss",
     "start": "node src/index.js"
   },
   "dependencies": {
