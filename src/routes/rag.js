@@ -2,6 +2,7 @@ import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import crypto from 'node:crypto';
 import pg from 'pg';
+import mysql from 'mysql2/promise';
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -11,6 +12,33 @@ const CHUNK_OVERLAP = Number(process.env.RAG_CHUNK_OVERLAP || 120);
 const JINA_API_KEY = process.env.JINA_API_KEY || '';
 const RAG_URL_TIMEOUT_MS = Number(process.env.RAG_URL_TIMEOUT_MS || 30000);
 const { Pool } = pg;
+
+const createSqlPool = (preset) => {
+  const driver = String(preset.driver || process.env.RAG_SQL_DRIVER || 'postgres').toLowerCase();
+  const connectionString = process.env.RAG_SQL_DATABASE_URL;
+  if (!connectionString) throw Object.assign(new Error('RAG_SQL_DATABASE_URL is not configured'), { status: 503 });
+  if (driver === 'mysql' || driver === 'mariadb') {
+    return mysql.createPool({
+      uri: connectionString,
+      waitForConnections: true,
+      connectionLimit: Number(process.env.RAG_SQL_POOL_SIZE || 2),
+      enableKeepAlive: true,
+      ssl: process.env.RAG_SQL_SSL === 'true' ? { rejectUnauthorized: process.env.RAG_SQL_SSL_REJECT_UNAUTHORIZED !== 'false' } : undefined,
+    });
+  }
+  return new Pool({ connectionString, max: Number(process.env.RAG_SQL_POOL_SIZE || 2), ssl: process.env.RAG_SQL_SSL === 'true' ? { rejectUnauthorized: process.env.RAG_SQL_SSL_REJECT_UNAUTHORIZED !== 'false' } : undefined });
+};
+
+const assertReadOnlyQuery = (query) => {
+  const normalized = String(query || '')
+    .replace(/^\s*(?:--[^\n]*\n|\/\*[\s\S]*?\*\/)+/g, '')
+    .trim()
+    .replace(/;\s*$/, '');
+  if (!/^(select|with)\b/i.test(normalized) || /;|\b(insert|update|delete|drop|alter|truncate|create|grant|revoke|replace|call|set|use|load)\b/i.test(normalized)) {
+    throw Object.assign(new Error('Only SELECT/CTE read-only queries are allowed for RAG SQL presets'), { status: 400 });
+  }
+  return normalized;
+};
 
 const collectionFor = (knowledgeBaseId, collection) => {
   const raw = collection || `kb_${knowledgeBaseId || 'global'}`;
@@ -179,11 +207,15 @@ router.post('/ingest/sql/:preset', async (req, res) => {
     const presets = JSON.parse(process.env.RAG_SQL_PRESETS || '{}');
     const preset = presets[req.params.preset];
     if (!preset?.query || !preset?.knowledge_base_id) return res.status(404).json({ error: 'SQL preset not found or incomplete' });
-    if (!process.env.RAG_SQL_DATABASE_URL) return res.status(503).json({ error: 'RAG_SQL_DATABASE_URL is not configured' });
-    pool = new Pool({ connectionString: process.env.RAG_SQL_DATABASE_URL, max: 2, ssl: process.env.RAG_SQL_SSL === 'true' ? { rejectUnauthorized: false } : undefined });
-    const result = await pool.query(preset.query, []);
+    const query = assertReadOnlyQuery(preset.query);
+    const driver = String(preset.driver || process.env.RAG_SQL_DRIVER || 'postgres').toLowerCase();
+    pool = createSqlPool(preset);
+    const result = driver === 'mysql' || driver === 'mariadb'
+      ? await pool.query(query)
+      : await pool.query(query, []);
+    const rows = (result.rows || result[0] || []).slice(0, Number(preset.max_rows || process.env.RAG_SQL_MAX_ROWS || 1000));
     let indexed = 0;
-    for (const row of result.rows) {
+    for (const row of rows) {
       const content = Object.entries(row).map(([key, value]) => `${key}: ${value ?? ''}`).join('\n');
       await createAndIndexDocument({
         knowledgeBaseId: preset.knowledge_base_id,
@@ -195,7 +227,7 @@ router.post('/ingest/sql/:preset', async (req, res) => {
       });
       indexed += 1;
     }
-    return res.status(201).json({ preset: req.params.preset, rows: result.rows.length, indexed });
+    return res.status(201).json({ preset: req.params.preset, driver, rows: rows.length, indexed });
   } catch (error) {
     console.error('RAG SQL ingestion error:', error);
     return res.status(error.status || 500).json({ error: 'SQL ingestion failed', message: error.message });
