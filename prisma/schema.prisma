@@ -58,8 +58,9 @@ model AIExecution {
   output            String?
   human_validation  String?
   justification     String?
-  resources_used    String?
-  created_date      DateTime @default(now())
+  resources_used          String?
+  configuration_snapshot  String?
+  created_date            DateTime @default(now())
 }
 
 model Risk {
