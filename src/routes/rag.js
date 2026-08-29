@@ -184,7 +184,7 @@ router.post('/ingest/sql/:preset', async (req, res) => {
     const result = await pool.query(preset.query, []);
     let indexed = 0;
     for (const row of result.rows) {
-      const content = Object.entries(row).map(([key, value]) => `${key}: ${value ?? ''}`).join('\\n');
+      const content = Object.entries(row).map(([key, value]) => `${key}: ${value ?? ''}`).join('\n');
       await createAndIndexDocument({
         knowledgeBaseId: preset.knowledge_base_id,
         name: `${preset.name || req.params.preset} — ${row[preset.primary_key] || indexed + 1}`,
