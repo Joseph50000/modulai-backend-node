@@ -12,7 +12,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: process.env.RAG_UPLOAD_LIMIT || '25mb' }));
 
 // Routes de test
 app.get('/api/health', (req, res) => {
