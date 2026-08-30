@@ -82,7 +82,9 @@ router.all('/*', async (req, res) => {
           num_predict: config.max_tokens // Ollama uses num_predict for max tokens
         };
         ragConfig = {
-          enabled: !!config.rag_enabled
+          enabled: !!config.rag_enabled,
+          knowledge_base_id: config.knowledge_base_id || config.knowledgeBaseId || undefined,
+          collection: config.knowledge_base_collection || config.collection || undefined,
         };
         // Nettoyer les valeurs undefined
         Object.keys(modelOptions).forEach(key => modelOptions[key] === undefined && delete modelOptions[key]);
@@ -90,9 +92,14 @@ router.all('/*', async (req, res) => {
     }
 
     // 3. Préparer le payload pour l'AI Core
+    const userPrompt = Object.entries(req.body || {})
+      .map(([key, value]) => `${key}: ${typeof value === 'object' ? JSON.stringify(value) : value ?? ''}`)
+      .join('\n');
+    if (ragConfig.enabled && !ragConfig.query) ragConfig.query = userPrompt;
     const payload = {
       module: matchedModule.module_key || moduleKey, // Utiliser la vraie clé métier du module
       use_case: resolvedPromptName,
+      user_prompt: userPrompt,
       variables: req.body, // On passe le body brut de la requête comme variables
       output_schema: outputSchema,
       model_options: modelOptions,
