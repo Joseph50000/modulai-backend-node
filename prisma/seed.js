@@ -35,6 +35,7 @@ const useCases = [
       { name: 'motif', type: 'string', required: true, description: 'Description du motif de réclamation.' },
       { name: 'anciennete_client', type: 'number', required: false, description: 'Ancienneté du client en années.' },
     ],
+    rag_config: { enabled: true, collection: 'gpr_claims_regulatory', knowledge_base_id: 'demo-gpr-regulatory-kb', top_k: 5 },
     output_schema: [
       { name: 'categorie', type: 'string', required: true, description: 'Catégorie normalisée.' },
       { name: 'priorite', type: 'string', required: true, description: 'Priorité basse, normale, haute ou critique.' },
@@ -243,6 +244,12 @@ async function upsertAll() {
     where: { id: ids.knowledgeBase },
     update: { name: 'Référentiel réclamations & protection client', description: 'Corpus de démonstration sur les délais de traitement, l’escalade et la communication client.', project_id: project.id, module_id: ids.module, vector_store: 'chromadb', embedding_model: 'all-MiniLM-L6-v2', chunk_size: 600, chunk_overlap: 80, status: 'ready', documents_count: 1, embeddings_count: 3, updated_date: now },
     create: { id: ids.knowledgeBase, name: 'Référentiel réclamations & protection client', description: 'Corpus de démonstration sur les délais de traitement, l’escalade et la communication client.', project_id: project.id, module_id: ids.module, vector_store: 'chromadb', embedding_model: 'all-MiniLM-L6-v2', chunk_size: 600, chunk_overlap: 80, status: 'ready', documents_count: 1, embeddings_count: 3, created_date: daysAgo(9) },
+  });
+
+  await prisma.ragCollection.upsert({
+    where: { id: 'demo-gpr-claims-regulatory-collection' },
+    update: { name: 'GPR — Réglementation réclamations', collection_name: 'gpr_claims_regulatory', description: 'Collection réglementaire utilisée par analyse-reclamation.', project_id: project.id, module_id: ids.module, knowledge_base_id: ids.knowledgeBase, embedding_model: 'all-MiniLM-L6-v2', distance_metric: 'cosine', status: 'active', updated_date: now },
+    create: { id: 'demo-gpr-claims-regulatory-collection', name: 'GPR — Réglementation réclamations', collection_name: 'gpr_claims_regulatory', description: 'Collection réglementaire utilisée par analyse-reclamation.', project_id: project.id, module_id: ids.module, knowledge_base_id: ids.knowledgeBase, embedding_model: 'all-MiniLM-L6-v2', distance_metric: 'cosine', status: 'active', created_date: daysAgo(9) },
   });
 
   await prisma.document.upsert({
