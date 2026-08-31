@@ -7,6 +7,8 @@ const ids = {
   module: 'demo-gpr-complaints-module',
   provider: 'demo-ollama-provider',
   model: 'demo-llama3-1-model',
+  cloudProvider: 'ollama-cloud-provider',
+  cloudModel: 'nemotron-3-super-model',
   prompt: 'demo-gpr-complaint-analysis-prompt',
   policy: 'demo-gpr-global-policy',
   version: 'demo-core-version-1-0-0',
@@ -71,7 +73,7 @@ async function upsertAll() {
       endpoint_url: process.env.LLM_BASE_URL || 'http://localhost:11434',
       base_url: process.env.LLM_BASE_URL || 'http://localhost:11434',
       status: 'active',
-      is_default: true,
+      is_default: false,
       api_key_set: false,
       updated_date: now,
     },
@@ -121,6 +123,66 @@ async function upsertAll() {
     },
   });
 
+  const existingCloudProvider = await prisma.aiProvider.findFirst({ where: { name: 'Ollama Cloud', api_key_set: true } });
+  const cloudApiKey = process.env.OLLAMA_API_KEY || process.env.LLM_API_KEY || existingCloudProvider?.api_key || '';
+  const cloudProvider = await prisma.aiProvider.upsert({
+    where: { id: ids.cloudProvider },
+    update: {
+      name: 'Ollama Cloud',
+      type: 'ollama',
+      endpoint_url: 'https://ollama.com',
+      base_url: 'https://ollama.com',
+      api_key: cloudApiKey || undefined,
+      status: 'active',
+      is_default: true,
+      api_key_set: cloudApiKey ? true : undefined,
+      updated_date: now,
+    },
+    create: {
+      id: ids.cloudProvider,
+      name: 'Ollama Cloud',
+      type: 'ollama',
+      endpoint_url: 'https://ollama.com',
+      base_url: 'https://ollama.com',
+      api_key: cloudApiKey || null,
+      status: 'active',
+      is_default: true,
+      api_key_set: Boolean(cloudApiKey),
+    },
+  });
+
+  const cloudModel = await prisma.aiModel.upsert({
+    where: { id: ids.cloudModel },
+    update: {
+      name: 'Nemotron 3 super',
+      model_id: 'nemotron-3-super',
+      provider_id: cloudProvider.id,
+      provider_name: cloudProvider.name,
+      type: 'chat',
+      version: '3',
+      context_window: 32768,
+      max_output_tokens: 4096,
+      temperature: 0.2,
+      capabilities: JSON.stringify(['chat', 'json', 'classification', 'reasoning']),
+      status: 'active',
+      updated_date: now,
+    },
+    create: {
+      id: ids.cloudModel,
+      name: 'Nemotron 3 super',
+      model_id: 'nemotron-3-super',
+      provider_id: cloudProvider.id,
+      provider_name: cloudProvider.name,
+      type: 'chat',
+      version: '3',
+      context_window: 32768,
+      max_output_tokens: 4096,
+      temperature: 0.2,
+      capabilities: JSON.stringify(['chat', 'json', 'classification', 'reasoning']),
+      status: 'active',
+    },
+  });
+
   const project = await prisma.project.upsert({
     where: { id: ids.project },
     update: {
@@ -157,7 +219,7 @@ async function upsertAll() {
       use_cases: JSON.stringify(useCases),
       data_sources: JSON.stringify([{ name: 'Dossiers clients', type: 'database', enabled: true }, { name: 'Référentiel réglementaire', type: 'documents', enabled: true }, { name: 'Historique des interactions', type: 'history', enabled: true }]),
       dependencies: JSON.stringify([{ name: 'AI Core', type: 'core', version: '>=1.0.0' }]),
-      configuration: JSON.stringify({ provider: 'ollama', model: ids.model, temperature: 0.2, max_tokens: 2048, rag_enabled: true, human_validation_required: true, audit_enabled: true }),
+      configuration: JSON.stringify({ provider: cloudProvider.id, provider_id: cloudProvider.id, model: cloudModel.id, temperature: 0.2, max_tokens: 2048, rag_enabled: true, human_validation_required: true, audit_enabled: true }),
       capabilities: JSON.stringify(['classification', 'risk_scoring', 'structured_output', 'rag']),
       endpoints: JSON.stringify([
         { key: 'analyse-reclamation', name: 'Analyser une réclamation', method: 'POST', path: '/gpr/analyse-reclamation', use_case_key: 'gpr:analyse-reclamation', required_scopes: ['execute'], description: 'Qualifie et priorise une réclamation bancaire.' },
@@ -179,7 +241,7 @@ async function upsertAll() {
       use_cases: JSON.stringify(useCases),
       data_sources: JSON.stringify([{ name: 'Dossiers clients', type: 'database', enabled: true }, { name: 'Référentiel réglementaire', type: 'documents', enabled: true }, { name: 'Historique des interactions', type: 'history', enabled: true }]),
       dependencies: JSON.stringify([{ name: 'AI Core', type: 'core', version: '>=1.0.0' }]),
-      configuration: JSON.stringify({ provider: 'ollama', model: ids.model, temperature: 0.2, max_tokens: 2048, rag_enabled: true, human_validation_required: true, audit_enabled: true }),
+      configuration: JSON.stringify({ provider: cloudProvider.id, provider_id: cloudProvider.id, model: cloudModel.id, temperature: 0.2, max_tokens: 2048, rag_enabled: true, human_validation_required: true, audit_enabled: true }),
       capabilities: JSON.stringify(['classification', 'risk_scoring', 'structured_output', 'rag']),
       endpoints: JSON.stringify([
         { key: 'analyse-reclamation', name: 'Analyser une réclamation', method: 'POST', path: '/gpr/analyse-reclamation', use_case_key: 'gpr:analyse-reclamation', required_scopes: ['execute'], description: 'Qualifie et priorise une réclamation bancaire.' },
@@ -224,8 +286,8 @@ async function upsertAll() {
 
   await prisma.aiPolicy.upsert({
     where: { id: ids.policy },
-    update: { name: 'Politique GPR Banque — Contrôle humain', scope: 'global', description: 'Impose une validation humaine pour les réclamations à risque et limite la température du modèle.', strict_mode: true, max_tokens: 2048, max_execution_time: 30, temperature_max: 0.3, max_cost_per_month: 50, allowed_models: JSON.stringify([ids.model]), fallback_model_id: ids.model, rag_required: false, human_validation_required: true, status: 'active', updated_date: now },
-    create: { id: ids.policy, name: 'Politique GPR Banque — Contrôle humain', scope: 'global', description: 'Impose une validation humaine pour les réclamations à risque et limite la température du modèle.', strict_mode: true, max_tokens: 2048, max_execution_time: 30, temperature_max: 0.3, max_cost_per_month: 50, allowed_models: JSON.stringify([ids.model]), fallback_model_id: ids.model, rag_required: false, human_validation_required: true, status: 'active', created_date: daysAgo(10) },
+    update: { name: 'Politique GPR Banque — Contrôle humain', scope: 'global', description: 'Impose une validation humaine pour les réclamations à risque et limite la température du modèle.', strict_mode: true, max_tokens: 2048, max_execution_time: 30, temperature_max: 0.3, max_cost_per_month: 50, allowed_models: JSON.stringify([cloudModel.id]), fallback_model_id: cloudModel.id, rag_required: false, human_validation_required: true, status: 'active', updated_date: now },
+    create: { id: ids.policy, name: 'Politique GPR Banque — Contrôle humain', scope: 'global', description: 'Impose une validation humaine pour les réclamations à risque et limite la température du modèle.', strict_mode: true, max_tokens: 2048, max_execution_time: 30, temperature_max: 0.3, max_cost_per_month: 50, allowed_models: JSON.stringify([cloudModel.id]), fallback_model_id: cloudModel.id, rag_required: false, human_validation_required: true, status: 'active', created_date: daysAgo(10) },
   });
 
   await prisma.coreVersion.upsert({
@@ -236,8 +298,8 @@ async function upsertAll() {
 
   await prisma.coreSettings.upsert({
     where: { id: ids.settings },
-    update: { default_provider: provider.name, default_model_id: model.id, default_model_name: model.name, default_embedding_model: 'all-MiniLM-L6-v2', default_vector_store: 'chromadb', default_temperature: 0.2, default_token_limit: 2048, default_rag_strategy: 'similarity', default_validation_policy: ids.policy, current_core_version: '1.0.0', updated_date: now },
-    create: { id: ids.settings, default_provider: provider.name, default_model_id: model.id, default_model_name: model.name, default_embedding_model: 'all-MiniLM-L6-v2', default_vector_store: 'chromadb', default_temperature: 0.2, default_token_limit: 2048, default_rag_strategy: 'similarity', default_validation_policy: ids.policy, current_core_version: '1.0.0', created_date: daysAgo(10) },
+    update: { default_provider: cloudProvider.name, default_model_id: cloudModel.id, default_model_name: cloudModel.name, default_embedding_model: 'all-MiniLM-L6-v2', default_vector_store: 'chromadb', default_temperature: 0.2, default_token_limit: 2048, default_rag_strategy: 'similarity', default_validation_policy: ids.policy, current_core_version: '1.0.0', updated_date: now },
+    create: { id: ids.settings, default_provider: cloudProvider.name, default_model_id: cloudModel.id, default_model_name: cloudModel.name, default_embedding_model: 'all-MiniLM-L6-v2', default_vector_store: 'chromadb', default_temperature: 0.2, default_token_limit: 2048, default_rag_strategy: 'similarity', default_validation_policy: ids.policy, current_core_version: '1.0.0', created_date: daysAgo(10) },
   });
 
   await prisma.knowledgeBase.upsert({
@@ -272,8 +334,8 @@ async function upsertAll() {
 
   await prisma.aIExecution.upsert({
     where: { id: ids.execution },
-    update: { project_id: project.id, project_name: project.name, use_case: 'analyse-reclamation', provider: provider.name, model: model.model_id, status: 'success', prompt_name: 'GPR — Analyse de réclamation bancaire', prompt_version: '1.0.0', module_name: 'GPR Banking — Plaintes & Réclamations', execution_time: 842, user_name: 'Sophie Martin — Gestionnaire réclamations', error: null, context_reference: JSON.stringify({ knowledge_base: ids.knowledgeBase, documents: 1 }), input_reference: JSON.stringify({ canal: 'Application mobile', produit: 'Carte bancaire', motif: 'Retrait non reconnu de 240 EUR', anciennete_client: 6 }), output: JSON.stringify({ categorie: 'Opération contestée', priorite: 'haute', score_risque: 78, prochaine_action: 'Bloquer temporairement la carte et ouvrir une investigation fraude.', justification: 'Opération non reconnue signalée depuis un canal authentifié.' }), human_validation: 'approved', justification: 'Dossier vérifié par le service fraude.', resources_used: 'Prompt: 486 chars | Provider: Ollama local — Démonstration | RAG', created_date: daysAgo(1) },
-    create: { id: ids.execution, project_id: project.id, project_name: project.name, use_case: 'analyse-reclamation', provider: provider.name, model: model.model_id, status: 'success', prompt_name: 'GPR — Analyse de réclamation bancaire', prompt_version: '1.0.0', module_name: 'GPR Banking — Plaintes & Réclamations', execution_time: 842, user_name: 'Sophie Martin — Gestionnaire réclamations', context_reference: JSON.stringify({ knowledge_base: ids.knowledgeBase, documents: 1 }), input_reference: JSON.stringify({ canal: 'Application mobile', produit: 'Carte bancaire', motif: 'Retrait non reconnu de 240 EUR', anciennete_client: 6 }), output: JSON.stringify({ categorie: 'Opération contestée', priorite: 'haute', score_risque: 78, prochaine_action: 'Bloquer temporairement la carte et ouvrir une investigation fraude.', justification: 'Opération non reconnue signalée depuis un canal authentifié.' }), human_validation: 'approved', justification: 'Dossier vérifié par le service fraude.', resources_used: 'Prompt: 486 chars | Provider: Ollama local — Démonstration | RAG', created_date: daysAgo(1) },
+    update: { project_id: project.id, project_name: project.name, use_case: 'analyse-reclamation', provider: cloudProvider.name, model: cloudModel.model_id, status: 'success', prompt_name: 'GPR — Analyse de réclamation bancaire', prompt_version: '1.0.0', module_name: 'GPR Banking — Plaintes & Réclamations', execution_time: 842, user_name: 'Sophie Martin — Gestionnaire réclamations', error: null, context_reference: JSON.stringify({ knowledge_base: ids.knowledgeBase, documents: 1 }), input_reference: JSON.stringify({ canal: 'Application mobile', produit: 'Carte bancaire', motif: 'Retrait non reconnu de 240 EUR', anciennete_client: 6 }), output: JSON.stringify({ categorie: 'Opération contestée', priorite: 'haute', score_risque: 78, prochaine_action: 'Bloquer temporairement la carte et ouvrir une investigation fraude.', justification: 'Opération non reconnue signalée depuis un canal authentifié.' }), human_validation: 'approved', justification: 'Dossier vérifié par le service fraude.', resources_used: 'Prompt: 486 chars | Provider: Ollama Cloud | RAG', created_date: daysAgo(1) },
+    create: { id: ids.execution, project_id: project.id, project_name: project.name, use_case: 'analyse-reclamation', provider: cloudProvider.name, model: cloudModel.model_id, status: 'success', prompt_name: 'GPR — Analyse de réclamation bancaire', prompt_version: '1.0.0', module_name: 'GPR Banking — Plaintes & Réclamations', execution_time: 842, user_name: 'Sophie Martin — Gestionnaire réclamations', context_reference: JSON.stringify({ knowledge_base: ids.knowledgeBase, documents: 1 }), input_reference: JSON.stringify({ canal: 'Application mobile', produit: 'Carte bancaire', motif: 'Retrait non reconnu de 240 EUR', anciennete_client: 6 }), output: JSON.stringify({ categorie: 'Opération contestée', priorite: 'haute', score_risque: 78, prochaine_action: 'Bloquer temporairement la carte et ouvrir une investigation fraude.', justification: 'Opération non reconnue signalée depuis un canal authentifié.' }), human_validation: 'approved', justification: 'Dossier vérifié par le service fraude.', resources_used: 'Prompt: 486 chars | Provider: Ollama Cloud | RAG', created_date: daysAgo(1) },
   });
 
   await prisma.auditEvent.upsert({
@@ -288,7 +350,7 @@ async function upsertAll() {
     create: { id: ids.apiLog, request_id: 'req_demo_gpr_001', project_id: project.id, endpoint: '/api/dynamic/gpr/analyse-reclamation', method: 'POST', status_code: 200, duration: 842, user_id: 'demo-user-sophie-martin', created_date: daysAgo(1) },
   });
 
-  return { project, provider, model };
+  return { project, provider: cloudProvider, model: cloudModel };
 }
 
 try {
