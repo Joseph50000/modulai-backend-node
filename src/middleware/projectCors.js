@@ -12,8 +12,13 @@ function parseConfiguration(value) {
   try { return JSON.parse(value); } catch (_) { return {}; }
 }
 
+function corsConfigForProject(project) {
+  return parseConfiguration(project?.configuration).cors || {};
+}
+
 function originsForProject(project) {
-  const cors = parseConfiguration(project?.configuration).cors || {};
+  const cors = corsConfigForProject(project);
+  if (cors.enabled === false) return [];
   return Array.isArray(cors.allowed_origins)
     ? cors.allowed_origins.filter((origin) => typeof origin === 'string' && origin.trim())
     : [];
