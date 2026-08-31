@@ -1,5 +1,5 @@
 import express from 'express';
-import cors from 'cors';
+import { projectCors } from './middleware/projectCors.js';
 import dotenv from 'dotenv';
 import authRoutes from './routes/auth.js';
 import entityRoutes from './routes/entities.js';
@@ -11,7 +11,7 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
+// Les routes dynamiques appliquent la policy CORS du projet ciblé.
 app.use(express.json({ limit: process.env.RAG_UPLOAD_LIMIT || '25mb' }));
 
 // Routes de test
@@ -25,7 +25,7 @@ app.use('/api/ai', aiRoutes);
 app.use('/api/rag', ragRoutes);
 
 // Gateway dynamique pour les endpoints des modules
-app.use('/api/dynamic', gatewayRoutes);
+app.use('/api/dynamic', projectCors, gatewayRoutes);
 
 // Generic CRUD API (doit être en dernier pour ne pas intercepter les autres)
 app.use('/api', entityRoutes);
