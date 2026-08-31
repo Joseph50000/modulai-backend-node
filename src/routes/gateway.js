@@ -71,9 +71,10 @@ router.all('/*', async (req, res) => {
       return res.status(400).json({ error: 'Endpoint is not linked to any AI Use Case.' });
     }
 
-    const parts = useCaseKeyFull.split(':');
-    const moduleKey = parts[0];
-    const useCaseKey = parts.length > 1 ? parts[1] : parts[0];
+    const parts = String(useCaseKeyFull).split(':');
+    const moduleKey = matchedModule.module_key || parts[0];
+    const useCaseKey = parts.length > 1 ? parts.slice(1).join(':') : parts[0];
+    const canonicalUseCaseKey = `${moduleKey}:${useCaseKey}`;
 
     // Résoudre le vrai nom du prompt (prompt_name) défini dans le Use Case
     let resolvedPromptName = useCaseKey;
@@ -83,7 +84,7 @@ router.all('/*', async (req, res) => {
     if (matchedModule.use_cases) {
       try {
         const useCases = JSON.parse(matchedModule.use_cases);
-        const uc = useCases.find(u => u.key === useCaseKey);
+        const uc = useCases.find(u => u.key === useCaseKey || `${moduleKey}:${u.key}` === canonicalUseCaseKey);
         if (uc) {
           if (uc.prompt_name) resolvedPromptName = uc.prompt_name;
           if (uc.rag_config && typeof uc.rag_config === 'object') useCaseRagConfig = uc.rag_config;
@@ -123,7 +124,7 @@ router.all('/*', async (req, res) => {
       .join('\n');
     if (ragConfig.enabled && !ragConfig.query) ragConfig.query = userPrompt;
     const payload = {
-      module: matchedModule.module_key || moduleKey, // Utiliser la vraie clé métier du module
+      module: moduleKey, // Utiliser la vraie clé métier du module
       use_case: resolvedPromptName,
       user_prompt: userPrompt,
       variables: req.body, // On passe le body brut de la requête comme variables
