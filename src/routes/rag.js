@@ -45,6 +45,18 @@ const collectionFor = (knowledgeBaseId, collection) => {
   return raw.toString().replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 63) || 'kb_global';
 };
 
+const collectionForKnowledgeBase = async (knowledgeBaseId, requestedCollection) => {
+  if (requestedCollection) return collectionFor(null, requestedCollection);
+  if (knowledgeBaseId) {
+    const configured = await prisma.ragCollection.findFirst({
+      where: { knowledge_base_id: knowledgeBaseId },
+      select: { collection_name: true },
+    });
+    if (configured?.collection_name) return collectionFor(null, configured.collection_name);
+  }
+  return collectionFor(knowledgeBaseId);
+};
+
 const splitIntoChunks = (text) => {
   const value = String(text || '').trim();
   if (!value) return [];
@@ -93,7 +105,7 @@ const indexDocumentRecord = async (document) => {
   const knowledgeBaseId = document.knowledge_base_id || document.kb_id || null;
   const chunks = splitIntoChunks(document.content);
   if (!chunks.length) throw new Error('Le document est vide et ne peut pas être indexé.');
-  const collection = collectionFor(knowledgeBaseId);
+  const collection = await collectionForKnowledgeBase(knowledgeBaseId);
   const result = await callCore('/api/rag/index', {
     collection,
     documents: chunks,
@@ -262,7 +274,7 @@ router.post('/reindex/:knowledgeBaseId', async (req, res) => {
       indexed += 1;
       chunks += result.chunks || 0;
     }
-    return res.json({ knowledge_base_id: knowledgeBaseId, documents: indexed, chunks, collection: collectionFor(knowledgeBaseId) });
+    return res.json({ knowledge_base_id: knowledgeBaseId, documents: indexed, chunks, collection: await collectionForKnowledgeBase(knowledgeBaseId) });
   } catch (error) {
     console.error('RAG reindex error:', error);
     return res.status(error.status || 500).json({ error: 'RAG reindex failed', message: error.message });
@@ -275,7 +287,7 @@ router.post('/search', async (req, res) => {
     if (!query || !String(query).trim()) return res.status(400).json({ error: 'query is required' });
     const kbId = knowledgeBaseId || knowledge_base_id;
     const result = await callCore('/api/rag/search', {
-      collection: collectionFor(kbId, collection),
+      collection: await collectionForKnowledgeBase(kbId, collection),
       query: String(query),
       top_k: Number(topK || top_k || 5),
       filter_metadata: filter || (kbId ? { knowledge_base_id: kbId } : undefined),
