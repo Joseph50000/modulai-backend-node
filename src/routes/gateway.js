@@ -8,9 +8,30 @@ const AI_CORE_URL = (process.env.AI_CORE_URL || 'http://localhost:8001').replace
 
 // Intercepte toutes les requêtes dynamiques
 router.all('/*', async (req, res) => {
+  const startedAt = Date.now();
+  const method = req.method;
+  const requestPath = req.params[0].replace(/^\/+|\/+$/g, '');
+  const projectId = req.headers['x-project-id'] || null;
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const persistLog = async (statusCode) => {
+    try {
+      await prisma.apiLog.create({
+        data: {
+          request_id: requestId,
+          project_id: projectId,
+          endpoint: `/api/dynamic/${requestPath}`,
+          method,
+          status_code: statusCode,
+          duration: Date.now() - startedAt,
+          user_id: req.user?.id || null,
+        },
+      });
+    } catch (logError) {
+      console.error('API log persistence error:', logError);
+    }
+  };
+
   try {
-    const method = req.method;
-    const requestPath = req.params[0].replace(/^\/+|\/+$/g, '');
 
     // 1. Chercher un module actif qui expose cet endpoint
     const modules = await prisma.module.findMany({
@@ -39,12 +60,14 @@ router.all('/*', async (req, res) => {
     }
 
     if (!matchedEndpoint) {
+      await persistLog(404);
       return res.status(404).json({ error: 'Dynamic endpoint not found in any published module.' });
     }
 
     // 2. Extraire la clé du Use Case
     const useCaseKeyFull = matchedEndpoint.use_case_key; // ex: "gpr:analyse-plainte"
     if (!useCaseKeyFull) {
+      await persistLog(400);
       return res.status(400).json({ error: 'Endpoint is not linked to any AI Use Case.' });
     }
 
@@ -122,16 +145,19 @@ router.all('/*', async (req, res) => {
 
     if (!aiResponse.ok) {
       const errorData = await aiResponse.text();
+      await persistLog(aiResponse.status);
       return res.status(aiResponse.status).json({ error: 'AI Core Error', details: errorData });
     }
 
     const data = await aiResponse.json();
+    await persistLog(200);
     
-    // 5. Retourner le résultat généré par l'IA au client
+    // 5. Retourner le résultat généré par l’IA au client
     return res.json(data);
 
   } catch (error) {
     console.error('API Gateway Error:', error);
+    await persistLog(500);
     return res.status(500).json({ error: 'Internal Gateway Error', message: error.message });
   }
 });
