@@ -163,6 +163,24 @@ model Document {
   updated_date      DateTime @updatedAt
 }
 
+model RagCollection {
+  id                String   @id @default(uuid())
+  name              String
+  collection_name   String   @unique
+  description       String?
+  project_id        String?
+  module_id         String?
+  knowledge_base_id String?
+  embedding_model   String?
+  distance_metric   String?
+  metadata_schema   String?
+  status            String?
+  documents_count   Int?
+  embeddings_count  Int?
+  created_date      DateTime @default(now())
+  updated_date      DateTime @updatedAt
+}
+
 model AiProvider {
   id               String   @id @default(uuid())
   name             String?

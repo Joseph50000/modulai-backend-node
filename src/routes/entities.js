@@ -19,6 +19,7 @@ const getModel = (entity) => {
   if (lower === 'auditevent') return prisma.auditEvent;
   if (lower === 'apikey') return prisma.apiKey;
   if (lower === 'knowledgebase') return prisma.knowledgeBase;
+  if (lower === 'ragcollection') return prisma.ragCollection;
   if (lower === 'aiprovider') return prisma.aiProvider;
   if (lower === 'aimodel') return prisma.aiModel;
   if (lower === 'aipolicy') return prisma.aiPolicy;
