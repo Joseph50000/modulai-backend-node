@@ -78,6 +78,7 @@ router.all('/*', async (req, res) => {
     // Résoudre le vrai nom du prompt (prompt_name) défini dans le Use Case
     let resolvedPromptName = useCaseKey;
     let outputSchema = null;
+    let useCaseRagConfig = {};
     
     if (matchedModule.use_cases) {
       try {
@@ -85,6 +86,7 @@ router.all('/*', async (req, res) => {
         const uc = useCases.find(u => u.key === useCaseKey);
         if (uc) {
           if (uc.prompt_name) resolvedPromptName = uc.prompt_name;
+          if (uc.rag_config && typeof uc.rag_config === 'object') useCaseRagConfig = uc.rag_config;
           if (uc.output_schema && uc.output_schema.length > 0) {
             outputSchema = uc.output_schema;
           }
@@ -113,6 +115,7 @@ router.all('/*', async (req, res) => {
         Object.keys(modelOptions).forEach(key => modelOptions[key] === undefined && delete modelOptions[key]);
       } catch (e) {}
     }
+    ragConfig = { ...ragConfig, ...useCaseRagConfig };
 
     // 3. Préparer le payload pour l'AI Core
     const userPrompt = Object.entries(req.body || {})
