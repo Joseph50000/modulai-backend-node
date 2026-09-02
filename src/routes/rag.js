@@ -103,9 +103,10 @@ const syncKnowledgeBaseCounters = async (knowledgeBaseId) => {
 
 const indexDocumentRecord = async (document) => {
   const knowledgeBaseId = document.knowledge_base_id || document.kb_id || null;
+  const documentMetadata = typeof document.metadata === 'string' ? (() => { try { return JSON.parse(document.metadata); } catch { return {}; } })() : (document.metadata || {});
   const chunks = splitIntoChunks(document.content);
   if (!chunks.length) throw new Error('Le document est vide et ne peut pas être indexé.');
-  const collection = await collectionForKnowledgeBase(knowledgeBaseId);
+  const collection = await collectionForKnowledgeBase(knowledgeBaseId, documentMetadata.rag_collection);
   const result = await callCore('/api/rag/index', {
     collection,
     documents: chunks,
@@ -126,7 +127,7 @@ const indexDocumentRecord = async (document) => {
   return { ...result, document_id: document.id, chunks: chunks.length, collection };
 };
 
-const createAndIndexDocument = async ({ knowledgeBaseId, name, content, type, source, size, metadata = {} }) => {
+const createAndIndexDocument = async ({ knowledgeBaseId, collection, name, content, type, source, size, metadata = {} }) => {
   const document = await prisma.document.create({
     data: {
       id: crypto.randomUUID(),
@@ -138,7 +139,7 @@ const createAndIndexDocument = async ({ knowledgeBaseId, name, content, type, so
       size: size || Buffer.byteLength(content || '', 'utf8'),
       status: 'pending',
       content,
-      metadata: JSON.stringify(metadata),
+      metadata: JSON.stringify({ ...metadata, ...(collection ? { rag_collection: collection } : {}) }),
       chunks: JSON.stringify([]),
       chunk_count: 0,
     },
@@ -156,7 +157,7 @@ const createAndIndexDocument = async ({ knowledgeBaseId, name, content, type, so
 
 router.post('/ingest/file', async (req, res) => {
   try {
-    const { knowledge_base_id, knowledgeBaseId: requestedKnowledgeBaseId, filename, content_base64, metadata } = req.body || {};
+    const { knowledge_base_id, knowledgeBaseId: requestedKnowledgeBaseId, collection, filename, content_base64, metadata } = req.body || {};
     if (!knowledge_base_id && !requestedKnowledgeBaseId) return res.status(400).json({ error: 'knowledge_base_id is required' });
     if (!filename || !content_base64) return res.status(400).json({ error: 'filename and content_base64 are required' });
     const knowledgeBaseId = knowledge_base_id || requestedKnowledgeBaseId;
@@ -167,6 +168,7 @@ router.post('/ingest/file', async (req, res) => {
     });
     const result = await createAndIndexDocument({
       knowledgeBaseId,
+      collection,
       name: filename,
       content: extraction.text,
       type: extraction.type,
@@ -183,7 +185,7 @@ router.post('/ingest/file', async (req, res) => {
 
 router.post('/ingest/url', async (req, res) => {
   try {
-    const { knowledge_base_id, knowledgeBaseId, url, metadata = {} } = req.body || {};
+    const { knowledge_base_id, knowledgeBaseId, collection, url, metadata = {} } = req.body || {};
     const kbId = knowledge_base_id || knowledgeBaseId;
     if (!kbId || !url) return res.status(400).json({ error: 'knowledge_base_id and url are required' });
     const parsed = new URL(url);
@@ -200,6 +202,7 @@ router.post('/ingest/url', async (req, res) => {
     const title = text.match(/^#\\s+(.+)$/m)?.[1]?.trim() || parsed.hostname;
     const result = await createAndIndexDocument({
       knowledgeBaseId: kbId,
+      collection,
       name: title,
       content: text,
       type: 'url',
@@ -231,6 +234,7 @@ router.post('/ingest/sql/:preset', async (req, res) => {
       const content = Object.entries(row).map(([key, value]) => `${key}: ${value ?? ''}`).join('\n');
       await createAndIndexDocument({
         knowledgeBaseId: preset.knowledge_base_id,
+        collection: preset.collection || preset.collection_name,
         name: `${preset.name || req.params.preset} — ${row[preset.primary_key] || indexed + 1}`,
         content,
         type: 'sql',
@@ -296,6 +300,20 @@ router.post('/search', async (req, res) => {
   } catch (error) {
     console.error('RAG search error:', error);
     return res.status(error.status || 500).json({ error: 'RAG search failed', message: error.message });
+  }
+});
+
+router.get('/collection/:id/inspect', async (req, res) => {
+  try {
+    const item = await prisma.ragCollection.findFirst({
+      where: { OR: [{ id: req.params.id }, { collection_name: req.params.id }] },
+    });
+    if (!item) return res.status(404).json({ error: 'RAG collection not found' });
+    const result = await callCore('/api/rag/inspect', { collection: item.collection_name, limit: Math.min(Number(req.query.limit || 100), 100) });
+    return res.json({ ...result, id: item.id, display_name: item.name, collection_name: item.collection_name });
+  } catch (error) {
+    console.error('RAG collection inspection error:', error);
+    return res.status(error.status || 500).json({ error: 'RAG collection inspection failed', message: error.message });
   }
 });
 
