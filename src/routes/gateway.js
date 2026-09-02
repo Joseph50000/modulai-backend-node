@@ -132,7 +132,7 @@ router.all('/*', async (req, res) => {
       model_options: modelOptions,
       rag_config: ragConfig,
       project_id: req.headers['x-project-id'] || null,
-      project_name: req.headers['x-project-name'] || null,
+      project_name: req.headers['x-project-name'] ? decodeURIComponent(req.headers['x-project-name']) : null,
       input_reference: req.body, // The input form data
       context_reference: {
         "base_de_donnees": ragConfig.enabled,

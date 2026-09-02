@@ -5,6 +5,16 @@ const router = express.Router();
 
 const AI_CORE_URL = (process.env.AI_CORE_URL || 'http://localhost:8001').replace(/\/$/, '');
 
+router.get('/health', async (_req, res) => {
+  try {
+    const response = await fetch(`${AI_CORE_URL}/`, { signal: AbortSignal.timeout(5000) });
+    const data = await response.json();
+    return res.status(response.ok ? 200 : response.status).json(data);
+  } catch (error) {
+    return res.status(503).json({ status: 'offline', service: 'ModulAI Core', message: error.message });
+  }
+});
+
 router.post('/execute', async (req, res) => {
   try {
     const payload = req.body;

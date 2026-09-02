@@ -6,10 +6,23 @@ import entityRoutes from './routes/entities.js';
 import aiRoutes from './routes/ai.js';
 import gatewayRoutes from './routes/gateway.js';
 import ragRoutes from './routes/rag.js';
+import cors from 'cors';
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Le frontend est servi par WebDev sur un sous-domaine manus.computer.
+// Autoriser uniquement les origines de démonstration attendues et les environnements locaux.
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || /(^https?:\/\/localhost(?::\d+)?$)|(^https?:\/\/127\.0\.0\.1(?::\d+)?$)|(^https:\/\/[^/]+\.manus(?:pre)?\.computer$)/.test(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('Origin not allowed by ModulAI CORS policy'));
+  },
+  credentials: true,
+}));
 
 // Les routes dynamiques appliquent la policy CORS du projet ciblé.
 app.use(express.json({ limit: process.env.RAG_UPLOAD_LIMIT || '25mb' }));
