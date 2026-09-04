@@ -309,7 +309,11 @@ router.get('/collection/:id/inspect', async (req, res) => {
       where: { OR: [{ id: req.params.id }, { collection_name: req.params.id }] },
     });
     if (!item) return res.status(404).json({ error: 'RAG collection not found' });
-    const result = await callCore('/api/rag/inspect', { collection: item.collection_name, limit: Math.min(Number(req.query.limit || 100), 100) });
+    const result = await callCore('/api/rag/inspect', {
+      collection: item.collection_name,
+      limit: Math.min(Math.max(Number(req.query.limit || 50), 1), 100),
+      offset: Math.max(Number(req.query.offset || 0), 0),
+    });
     return res.json({ ...result, id: item.id, display_name: item.name, collection_name: item.collection_name });
   } catch (error) {
     console.error('RAG collection inspection error:', error);
