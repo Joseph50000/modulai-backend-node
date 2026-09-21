@@ -123,7 +123,17 @@ router.all('/*', async (req, res) => {
       .map(([key, value]) => `${key}: ${typeof value === 'object' ? JSON.stringify(value) : value ?? ''}`)
       .join('\n');
     if (ragConfig.enabled && !ragConfig.query) ragConfig.query = userPrompt;
+    const requestOptions = {};
+    if (ragConfig.query) requestOptions.rag_query = ragConfig.query;
+    if (ragConfig.top_k !== undefined) requestOptions.top_k = ragConfig.top_k;
     const payload = {
+      // Contrat canonique : les identifiants et les donnees d'appel sont
+      // transmis separement de la configuration legacy conservee ci-dessous.
+      module_id: matchedModule.id,
+      module_key: moduleKey,
+      use_case_key: useCaseKey,
+      input: req.body || {},
+      request_options: requestOptions,
       module: moduleKey, // Utiliser la vraie clé métier du module
       use_case: resolvedPromptName,
       user_prompt: userPrompt,
