@@ -118,6 +118,102 @@ router.all('/*', async (req, res) => {
     }
     ragConfig = { ...ragConfig, ...useCaseRagConfig };
 
+    // Support des endpoints audio (Transcription)
+    if (matchedEndpoint.type === 'audio' || req.body?.audio_base64) {
+      let vocabularyTerms = [];
+      let speakerRoles = undefined;
+      if (matchedModule.configuration) {
+        try {
+          const modConf = JSON.parse(matchedModule.configuration);
+          if (Array.isArray(modConf.vocabulary_terms)) vocabularyTerms = modConf.vocabulary_terms;
+          if (Array.isArray(modConf.speaker_roles)) speakerRoles = modConf.speaker_roles;
+        } catch (e) {}
+      }
+
+      const audioPayload = {
+        audio_base64: req.body?.audio_base64,
+        filename: req.body?.filename || 'audio.mp3',
+        project_id: projectId,
+        module_key: moduleKey,
+        use_case_key: useCaseKey,
+        language: req.body?.language || 'fr',
+        vocabulary_terms: req.body?.vocabulary_terms || vocabularyTerms,
+        enable_correction: req.body?.enable_correction !== false,
+        diarization: req.body?.diarization ?? Boolean(speakerRoles),
+        speaker_roles: req.body?.speaker_roles || speakerRoles,
+        custom_correction_prompt: req.body?.custom_correction_prompt,
+      };
+
+      const aiResponse = await fetch(`${AI_CORE_URL}/api/audio/transcribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(audioPayload),
+      });
+
+      if (!aiResponse.ok) {
+        const errorData = await aiResponse.text();
+        await persistLog(aiResponse.status);
+        return res.status(aiResponse.status).json({ error: 'AI Core Audio Error', details: errorData });
+      }
+
+      const data = await aiResponse.json();
+      await persistLog(200);
+      return res.json(data);
+    }
+
+    // Support des endpoints NLP & Classification sémantique
+    if (matchedEndpoint.type === 'nlp_analysis' || matchedEndpoint.type === 'classification' || req.body?.taxonomy || (req.body?.text && req.body?.sensitive_keywords)) {
+      let modTaxonomy = undefined;
+      let modKeywords = [];
+      let modUrgencyLevels = undefined;
+      let modContextNature = undefined;
+      let modContextDef = undefined;
+
+      if (matchedModule.configuration) {
+        try {
+          const modConf = JSON.parse(matchedModule.configuration);
+          if (modConf.taxonomy) modTaxonomy = modConf.taxonomy;
+          if (Array.isArray(modConf.sensitive_keywords)) modKeywords = modConf.sensitive_keywords;
+          if (Array.isArray(modConf.urgency_levels)) modUrgencyLevels = modConf.urgency_levels;
+          if (modConf.context_nature) modContextNature = modConf.context_nature;
+          if (modConf.context_definition) modContextDef = modConf.context_definition;
+        } catch (e) {}
+      }
+
+      const nlpPayload = {
+        text: req.body?.text || req.body?.texte || req.body?.content || '',
+        project_id: projectId,
+        module_key: moduleKey,
+        use_case_key: useCaseKey,
+        taxonomy: req.body?.taxonomy || req.body?.categories_motifs || modTaxonomy,
+        sensitive_keywords: req.body?.sensitive_keywords || req.body?.mots_sensibles || modKeywords,
+        urgency_levels: req.body?.urgency_levels || modUrgencyLevels || ['MINEUR', 'MOYEN', 'GRAVE'],
+        context_nature: req.body?.context_nature || req.body?.nature_dossier || modContextNature || 'DOSSIER',
+        context_definition: req.body?.context_definition || req.body?.definition_nature || modContextDef || '',
+        enable_llm_reasoning: req.body?.enable_llm_reasoning !== false,
+        generate_summary: req.body?.generate_summary !== false,
+        summary_type: req.body?.summary_type || 'extractive',
+        max_summary_words: req.body?.max_summary_words || 50,
+        language: req.body?.language || 'fr',
+      };
+
+      const aiResponse = await fetch(`${AI_CORE_URL}/api/nlp/analyze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(nlpPayload),
+      });
+
+      if (!aiResponse.ok) {
+        const errorData = await aiResponse.text();
+        await persistLog(aiResponse.status);
+        return res.status(aiResponse.status).json({ error: 'AI Core NLP Error', details: errorData });
+      }
+
+      const data = await aiResponse.json();
+      await persistLog(200);
+      return res.json(data);
+    }
+
     // 3. Préparer le payload pour l'AI Core
     const userPrompt = Object.entries(req.body || {})
       .map(([key, value]) => `${key}: ${typeof value === 'object' ? JSON.stringify(value) : value ?? ''}`)
