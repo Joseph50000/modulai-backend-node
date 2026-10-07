@@ -31,6 +31,44 @@ router.all('/*', async (req, res) => {
     }
   };
 
+  const persistExecution = async ({ status = 'success', outputData = null, errorMsg = null, configSnapshot = null, resourcesUsed = null }) => {
+    try {
+      const duration = Date.now() - startedAt;
+      await prisma.aIExecution.create({
+        data: {
+          project_id: projectId,
+          project_name: req.headers['x-project-name'] ? decodeURIComponent(req.headers['x-project-name']) : null,
+          module_name: matchedModule?.module_key || matchedModule?.name || 'unknown',
+          use_case: matchedEndpoint?.use_case_key || null,
+          status,
+          execution_time: duration,
+          user_name: req.user?.username || req.user?.email || 'api-gateway',
+          error: errorMsg || null,
+          input_reference: req.body ? JSON.stringify(req.body) : null,
+          output: outputData ? (typeof outputData === 'string' ? outputData : JSON.stringify(outputData)) : null,
+          configuration_snapshot: configSnapshot ? JSON.stringify(configSnapshot) : (matchedModule?.configuration || null),
+          resources_used: resourcesUsed ? JSON.stringify(resourcesUsed) : null,
+        },
+      });
+      await prisma.auditEvent.create({
+        data: {
+          action: 'DYNAMIC_AI_EXECUTION',
+          project_id: projectId,
+          project_name: req.headers['x-project-name'] ? decodeURIComponent(req.headers['x-project-name']) : null,
+          module_id: matchedModule?.id || null,
+          module_name: matchedModule?.module_key || matchedModule?.name || null,
+          use_case: matchedEndpoint?.use_case_key || null,
+          entity_type: 'AIExecution',
+          new_value: status,
+          comment: `Dynamic execution via ${method} /api/dynamic/${requestPath} (${duration}ms)`,
+          user_name: req.user?.username || 'api-gateway',
+        },
+      });
+    } catch (auditError) {
+      console.error('Audit persistence error:', auditError);
+    }
+  };
+
   try {
 
     // 1. Chercher un module actif qui expose cet endpoint
@@ -153,11 +191,13 @@ router.all('/*', async (req, res) => {
       if (!aiResponse.ok) {
         const errorData = await aiResponse.text();
         await persistLog(aiResponse.status);
+        await persistExecution({ status: 'failed', errorMsg: errorData });
         return res.status(aiResponse.status).json({ error: 'AI Core Audio Error', details: errorData });
       }
 
       const data = await aiResponse.json();
       await persistLog(200);
+      await persistExecution({ status: 'success', outputData: data, resourcesUsed: { audio_seconds: data.duration_seconds } });
       return res.json(data);
     }
 
@@ -206,11 +246,107 @@ router.all('/*', async (req, res) => {
       if (!aiResponse.ok) {
         const errorData = await aiResponse.text();
         await persistLog(aiResponse.status);
+        await persistExecution({ status: 'failed', errorMsg: errorData });
         return res.status(aiResponse.status).json({ error: 'AI Core NLP Error', details: errorData });
       }
 
       const data = await aiResponse.json();
       await persistLog(200);
+      await persistExecution({ status: 'success', outputData: data, resourcesUsed: { execution_time_ms: data.execution_time_ms } });
+      return res.json(data);
+    }
+
+    // Support des endpoints RAG Résolution assistée
+    if (matchedEndpoint.type === 'rag_resolution' || req.body?.historical_collection || (matchedEndpoint.type === 'search' && (ragConfig.enabled || req.body?.query))) {
+      let modHistCol = undefined;
+      let modDocCol = undefined;
+      let modHistFilter = undefined;
+      let modDocFilter = undefined;
+      let modNumProps = undefined;
+
+      if (matchedModule.configuration) {
+        try {
+          const modConf = JSON.parse(matchedModule.configuration);
+          if (modConf.historical_collection) modHistCol = modConf.historical_collection;
+          if (modConf.documentary_collection) modDocCol = modConf.documentary_collection;
+          if (modConf.history_filter) modHistFilter = modConf.history_filter;
+          if (modConf.documentary_filter) modDocFilter = modConf.documentary_filter;
+          if (modConf.num_propositions) modNumProps = modConf.num_propositions;
+        } catch (e) {}
+      }
+
+      const ragResolvePayload = {
+        query: req.body?.query || req.body?.texte_actuel || req.body?.text || req.body?.texte || '',
+        project_id: projectId,
+        module_key: moduleKey,
+        use_case_key: useCaseKey,
+        historical_collection: req.body?.historical_collection || ragConfig.collection || modHistCol,
+        documentary_collection: req.body?.documentary_collection || modDocCol,
+        top_k_history: req.body?.top_k_history || ragConfig.top_k || 3,
+        top_k_docs: req.body?.top_k_docs || 3,
+        min_similarity_score: req.body?.min_similarity_score,
+        history_filter: req.body?.history_filter || ragConfig.filter_metadata || modHistFilter,
+        documentary_filter: req.body?.documentary_filter || modDocFilter,
+        num_propositions: req.body?.num_propositions || modNumProps || 3,
+        system_role_instruction: req.body?.system_role_instruction,
+        custom_resolution_prompt: req.body?.custom_resolution_prompt,
+        target_solution_field: req.body?.target_solution_field,
+      };
+
+      const aiResponse = await fetch(`${AI_CORE_URL}/api/rag/resolve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(ragResolvePayload),
+      });
+
+      if (!aiResponse.ok) {
+        const errorData = await aiResponse.text();
+        await persistLog(aiResponse.status);
+        await persistExecution({ status: 'failed', errorMsg: errorData });
+        return res.status(aiResponse.status).json({ error: 'AI Core RAG Error', details: errorData });
+      }
+
+      const data = await aiResponse.json();
+      await persistLog(200);
+      await persistExecution({ status: 'success', outputData: data, resourcesUsed: { propositions_count: data.propositions?.length, sources_count: data.sources_used?.length } });
+      return res.json(data);
+    }
+
+    // Support des endpoints Analytics & Text-to-Viz
+    if (matchedEndpoint.type === 'analytics' || matchedEndpoint.type === 'text_to_viz' || req.body?.dataset_schema || (req.body?.query && req.body?.records)) {
+      let modSchema = undefined;
+      if (matchedModule.configuration) {
+        try {
+          const modConf = JSON.parse(matchedModule.configuration);
+          if (modConf.dataset_schema) modSchema = modConf.dataset_schema;
+        } catch (e) {}
+      }
+
+      const analyticsPayload = {
+        query: req.body?.query || req.body?.question || '',
+        dataset_schema: req.body?.dataset_schema || modSchema || { fields: [] },
+        records: req.body?.records || req.body?.data || [],
+        project_id: projectId,
+        module_key: moduleKey,
+        use_case_key: useCaseKey,
+      };
+
+      const aiResponse = await fetch(`${AI_CORE_URL}/api/analytics/chart`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(analyticsPayload),
+      });
+
+      if (!aiResponse.ok) {
+        const errorData = await aiResponse.text();
+        await persistLog(aiResponse.status);
+        await persistExecution({ status: 'failed', errorMsg: errorData });
+        return res.status(aiResponse.status).json({ error: 'AI Core Analytics Error', details: errorData });
+      }
+
+      const data = await aiResponse.json();
+      await persistLog(200);
+      await persistExecution({ status: 'success', outputData: data, resourcesUsed: { chart_type: data.chart_type, row_count: data.raw_aggregations?.length } });
       return res.json(data);
     }
 
@@ -256,11 +392,13 @@ router.all('/*', async (req, res) => {
     if (!aiResponse.ok) {
       const errorData = await aiResponse.text();
       await persistLog(aiResponse.status);
+      await persistExecution({ status: 'failed', errorMsg: errorData });
       return res.status(aiResponse.status).json({ error: 'AI Core Error', details: errorData });
     }
 
     const data = await aiResponse.json();
     await persistLog(200);
+    await persistExecution({ status: 'success', outputData: data, resourcesUsed: data.resources_used || null });
     
     // 5. Retourner le résultat généré par l’IA au client
     return res.json(data);
@@ -268,6 +406,7 @@ router.all('/*', async (req, res) => {
   } catch (error) {
     console.error('API Gateway Error:', error);
     await persistLog(500);
+    await persistExecution({ status: 'error', errorMsg: error.message });
     return res.status(500).json({ error: 'Internal Gateway Error', message: error.message });
   }
 });

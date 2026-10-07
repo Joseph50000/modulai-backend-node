@@ -321,4 +321,57 @@ router.get('/collection/:id/inspect', async (req, res) => {
   }
 });
 
+router.post('/sync/:collectionId', async (req, res) => {
+  try {
+    const { collectionId } = req.params;
+    const item = await prisma.ragCollection.findFirst({
+      where: { OR: [{ id: collectionId }, { collection_name: collectionId }] },
+    });
+    if (!item) return res.status(404).json({ error: 'RAG collection not found' });
+
+    const {
+      connector_type = 'json',
+      connector_config = {},
+      template_config = {
+        template: '{content}',
+        metadata_fields: [],
+      },
+      batch_size = 100,
+      clear_existing = false,
+    } = req.body || {};
+
+    const syncPayload = {
+      collection_name: item.collection_name,
+      connector_type,
+      connector_config,
+      template_config,
+      batch_size,
+      clear_existing,
+      project_id: item.project_id || null,
+    };
+
+    const syncResult = await callCore('/api/sync/execute', syncPayload);
+
+    if (syncResult && typeof syncResult.total_indexed === 'number') {
+      await prisma.ragCollection.update({
+        where: { id: item.id },
+        data: {
+          documents_count: clear_existing
+            ? syncResult.total_indexed
+            : (item.documents_count || 0) + syncResult.total_indexed,
+        },
+      }).catch((e) => console.warn('Could not update documents_count on ragCollection:', e.message));
+    }
+
+    return res.json({
+      collection_id: item.id,
+      collection_name: item.collection_name,
+      ...syncResult,
+    });
+  } catch (error) {
+    console.error('RAG sync error:', error);
+    return res.status(error.status || 500).json({ error: 'RAG sync failed', message: error.message });
+  }
+});
+
 export default router;
