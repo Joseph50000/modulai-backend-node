@@ -50,7 +50,7 @@ export async function projectCors(req, res, next) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, x-project-id, x-project-name');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, x-project-id, x-project-name, x-api-key');
     res.setHeader('Access-Control-Max-Age', '600');
 
     if (req.method === 'OPTIONS') return res.sendStatus(204);

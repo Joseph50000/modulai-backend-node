@@ -25,7 +25,7 @@ app.use(cors({
 }));
 
 // Les routes dynamiques appliquent la policy CORS du projet ciblé.
-app.use(express.json({ limit: process.env.RAG_UPLOAD_LIMIT || '25mb' }));
+app.use(express.json({ limit: process.env.RAG_UPLOAD_LIMIT || '50mb' }));
 
 // Routes de test
 app.get('/api/health', (req, res) => {

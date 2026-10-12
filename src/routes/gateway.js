@@ -6,6 +6,56 @@ const prisma = new PrismaClient();
 
 const AI_CORE_URL = (process.env.AI_CORE_URL || 'http://localhost:8001').replace(/\/$/, '');
 
+/**
+ * Extrait de façon agnostique le texte principal d'une requête
+ * en s'appuyant sur les métadonnées déclaratives du Use Case (input_schema).
+ */
+function extractPrimaryTextField(body, inputSchema = []) {
+  if (!body || typeof body !== 'object') return '';
+
+  // 1. Priorité aux clés universelles canoniques
+  if (typeof body.text === 'string' && body.text.trim()) return body.text.trim();
+  if (typeof body.texte === 'string' && body.texte.trim()) return body.texte.trim();
+  if (typeof body.content === 'string' && body.content.trim()) return body.content.trim();
+  if (typeof body.query === 'string' && body.query.trim()) return body.query.trim();
+
+  // 2. Résolution déclarative basée sur le input_schema du Use Case
+  let schemaList = [];
+  if (Array.isArray(inputSchema)) {
+    schemaList = inputSchema;
+  } else if (typeof inputSchema === 'string') {
+    try { schemaList = JSON.parse(inputSchema); } catch (_) {}
+  }
+
+  if (Array.isArray(schemaList) && schemaList.length > 0) {
+    const stringFields = schemaList.filter(f => f && f.type === 'string');
+
+    // 2.a. Chercher en priorité un champ string obligatoire (required: true) présent dans le body
+    const requiredField = stringFields.find(f => f.required && typeof body[f.name] === 'string' && body[f.name].trim());
+    if (requiredField) {
+      return body[requiredField.name].trim();
+    }
+
+    // 2.b. Chercher n'importe quel champ string déclaré présent dans le body
+    for (const f of stringFields) {
+      if (typeof body[f.name] === 'string' && body[f.name].trim()) {
+        return body[f.name].trim();
+      }
+    }
+  }
+
+  // 3. Repli universel : première propriété string non vide qui n'est pas un identifiant, métadonnée ou flux binaire/base64
+  const metaKeys = new Set(['id', 'token', 'action', 'type', 'channel', 'canal', 'produit', 'product', 'lang', 'language', 'category', 'categorie', 'motif', 'filename', 'file_name']);
+  for (const [key, val] of Object.entries(body)) {
+    const k = key.toLowerCase();
+    if (typeof val === 'string' && val.trim().length > 0 && !metaKeys.has(k) && !k.includes('base64') && !k.includes('audio')) {
+      return val.trim();
+    }
+  }
+
+  return '';
+}
+
 // Intercepte toutes les requêtes dynamiques
 router.all('/*', async (req, res) => {
   const startedAt = Date.now();
@@ -13,6 +63,8 @@ router.all('/*', async (req, res) => {
   const requestPath = req.params[0].replace(/^\/+|\/+$/g, '');
   const projectId = req.headers['x-project-id'] || null;
   const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  let matchedEndpoint = null;
+  let matchedModule = null;
   const persistLog = async (statusCode) => {
     try {
       await prisma.apiLog.create({
@@ -31,15 +83,23 @@ router.all('/*', async (req, res) => {
     }
   };
 
-  const persistExecution = async ({ status = 'success', outputData = null, errorMsg = null, configSnapshot = null, resourcesUsed = null }) => {
+  let resolvedModelName = null;
+  let resolvedProviderName = null;
+  let resolvedPromptName = null;
+
+  const persistExecution = async ({ status = 'success', outputData = null, errorMsg = null, configSnapshot = null, resourcesUsed = null, provider = null, model = null }) => {
     try {
       const duration = Date.now() - startedAt;
-      await prisma.aIExecution.create({
+      const createdExec = await prisma.aIExecution.create({
         data: {
           project_id: projectId,
           project_name: req.headers['x-project-name'] ? decodeURIComponent(req.headers['x-project-name']) : null,
           module_name: matchedModule?.module_key || matchedModule?.name || 'unknown',
           use_case: matchedEndpoint?.use_case_key || null,
+          prompt_name: resolvedPromptName || matchedEndpoint?.use_case_key || null,
+          prompt_version: matchedModule?.version || '1.0.0',
+          provider: provider || resolvedProviderName || null,
+          model: model || resolvedModelName || null,
           status,
           execution_time: duration,
           user_name: req.user?.username || req.user?.email || 'api-gateway',
@@ -50,6 +110,9 @@ router.all('/*', async (req, res) => {
           resources_used: resourcesUsed ? JSON.stringify(resourcesUsed) : null,
         },
       });
+      if (createdExec?.id && !res.headersSent) {
+        res.setHeader('x-execution-id', createdExec.id);
+      }
       await prisma.auditEvent.create({
         data: {
           action: 'DYNAMIC_AI_EXECUTION',
@@ -76,8 +139,8 @@ router.all('/*', async (req, res) => {
       where: { lifecycle: 'published' }
     });
 
-    let matchedEndpoint = null;
-    let matchedModule = null;
+    matchedEndpoint = null;
+    matchedModule = null;
 
     for (const mod of modules) {
       if (!mod.endpoints) continue;
@@ -115,8 +178,10 @@ router.all('/*', async (req, res) => {
     const canonicalUseCaseKey = `${moduleKey}:${useCaseKey}`;
 
     // Résoudre le vrai nom du prompt (prompt_name) défini dans le Use Case
-    let resolvedPromptName = useCaseKey;
+    resolvedPromptName = useCaseKey;
+    let matchedUseCase = null;
     let outputSchema = null;
+    let inputSchema = null;
     let useCaseRagConfig = {};
     
     if (matchedModule.use_cases) {
@@ -124,13 +189,43 @@ router.all('/*', async (req, res) => {
         const useCases = JSON.parse(matchedModule.use_cases);
         const uc = useCases.find(u => u.key === useCaseKey || `${moduleKey}:${u.key}` === canonicalUseCaseKey);
         if (uc) {
+          matchedUseCase = uc;
           if (uc.prompt_name) resolvedPromptName = uc.prompt_name;
           if (uc.rag_config && typeof uc.rag_config === 'object') useCaseRagConfig = uc.rag_config;
           if (uc.output_schema && uc.output_schema.length > 0) {
             outputSchema = uc.output_schema;
           }
+          if (uc.input_schema && uc.input_schema.length > 0) {
+            inputSchema = uc.input_schema;
+          }
         }
       } catch (e) {}
+    }
+
+    if (req.body?.output_schema) {
+      outputSchema = req.body.output_schema;
+    }
+    if (req.body?.input_schema) {
+      inputSchema = req.body.input_schema;
+    }
+
+    let resolvedPromptInstructions = matchedUseCase?.instructions || matchedUseCase?.prompt || null;
+    if (!resolvedPromptInstructions) {
+      try {
+        const promptRecord = await prisma.prompt.findFirst({
+          where: {
+            OR: [
+              { use_case: canonicalUseCaseKey },
+              { use_case: resolvedPromptName },
+              { name: resolvedPromptName },
+            ],
+            status: 'active',
+          },
+        });
+        if (promptRecord?.instructions) {
+          resolvedPromptInstructions = promptRecord.instructions;
+        }
+      } catch (_) {}
     }
 
     let modelOptions = {};
@@ -156,8 +251,163 @@ router.all('/*', async (req, res) => {
     }
     ragConfig = { ...ragConfig, ...useCaseRagConfig };
 
-    // Support des endpoints audio (Transcription)
-    if (matchedEndpoint.type === 'audio' || req.body?.audio_base64) {
+    let defaultSettings = null;
+    try {
+      defaultSettings = await prisma.coreSettings.findFirst();
+    } catch (_) {}
+
+    resolvedModelName = defaultSettings?.default_model_name || defaultSettings?.default_model_id || null;
+    resolvedProviderName = defaultSettings?.default_provider || null;
+
+    if (!resolvedModelName) {
+      try {
+        const defaultModel = (await prisma.aiModel.findFirst({ where: { is_default: true } })) || (await prisma.aiModel.findFirst());
+        resolvedModelName = defaultModel?.name || defaultModel?.model_id || 'default';
+      } catch (_) {
+        resolvedModelName = 'default';
+      }
+    }
+
+    if (!resolvedProviderName) {
+      try {
+        const defaultProvider = (await prisma.aiProvider.findFirst({ where: { is_default: true } })) || (await prisma.aiProvider.findFirst());
+        resolvedProviderName = defaultProvider?.name || defaultProvider?.type || 'default';
+      } catch (_) {
+        resolvedProviderName = 'default';
+      }
+    }
+
+    if (modelOptions.model) {
+      try {
+        const matchedAiModel = await prisma.aiModel.findFirst({
+          where: {
+            OR: [
+              { id: modelOptions.model },
+              { model_id: modelOptions.model },
+              { name: modelOptions.model },
+            ]
+          }
+        });
+        if (matchedAiModel?.name) {
+          resolvedModelName = matchedAiModel.name;
+        } else {
+          resolvedModelName = modelOptions.model;
+        }
+      } catch (_) {
+        resolvedModelName = modelOptions.model;
+      }
+    }
+
+    let matchedAiProvider = null;
+    if (modelOptions.provider) {
+      try {
+        matchedAiProvider = await prisma.aiProvider.findFirst({
+          where: {
+            OR: [
+              { id: modelOptions.provider },
+              { name: modelOptions.provider },
+            ]
+          }
+        });
+        if (matchedAiProvider?.name) {
+          resolvedProviderName = matchedAiProvider.name;
+        } else {
+          resolvedProviderName = modelOptions.provider;
+        }
+      } catch (_) {
+        resolvedProviderName = modelOptions.provider;
+      }
+    } else {
+      try {
+        matchedAiProvider = (await prisma.aiProvider.findFirst({ where: { is_default: true } })) || (await prisma.aiProvider.findFirst());
+      } catch (_) {}
+    }
+
+    // Helper pour résoudre le provider audio dédié (Groq / OpenAI / Whisper)
+    const resolveAudioProviderConfig = async () => {
+      let audioProvider = matchedAiProvider;
+      let audioModel = resolvedModelName;
+      if (!audioProvider || !['groq', 'openai'].includes(audioProvider.type?.toLowerCase())) {
+        try {
+          const allActiveProviders = await prisma.aiProvider.findMany({ where: { status: 'active' } });
+          const dedicatedAudioProvider = allActiveProviders.find(p => 
+            p.type?.toLowerCase() === 'groq' ||
+            p.type?.toLowerCase() === 'openai' ||
+            p.name?.toLowerCase().includes('groq') ||
+            p.name?.toLowerCase().includes('whisper')
+          );
+          if (dedicatedAudioProvider) {
+            audioProvider = dedicatedAudioProvider;
+            const allActiveModels = await prisma.aiModel.findMany({ where: { status: 'active' } });
+            const whisperModel = allActiveModels.find(m => 
+              m.provider_id === dedicatedAudioProvider.id && 
+              m.name?.toLowerCase().includes('whisper')
+            );
+            if (whisperModel) {
+              audioModel = whisperModel.model_id || whisperModel.name;
+            } else if (dedicatedAudioProvider.type?.toLowerCase() === 'groq') {
+              audioModel = 'whisper-large-v3';
+            }
+          }
+        } catch (e) {
+          console.error("Erreur lors de la résolution du provider audio :", e);
+        }
+      }
+      return {
+        provider: audioProvider?.name || resolvedProviderName,
+        model: audioModel || resolvedModelName,
+        apiKey: audioProvider?.api_key || audioProvider?.secret_hash || undefined,
+        endpointUrl: audioProvider?.endpoint_url || undefined,
+      };
+    };
+
+    // Détermination sémantique du type de Use Case (Architecture Découplée)
+    const candidateType = (matchedUseCase?.type || matchedEndpoint.type || 'standard').toLowerCase();
+
+    // -------------------------------------------------------------------------
+    // PILIER 2 (STANDALONE) : Recherche RAG Pure (Recherche Documentaire sans LLM)
+    // -------------------------------------------------------------------------
+    if (candidateType === 'search' || matchedEndpoint.type === 'search') {
+      const searchPayload = {
+        query: req.body?.query || req.body?.search || extractPrimaryTextField(req.body, inputSchema),
+        collection: req.body?.collection || ragConfig.collection || ragConfig.documentary_collection || ragConfig.historical_collection || 'default',
+        top_k: Number(req.body?.top_k || ragConfig.top_k || 3),
+        filter_metadata: req.body?.filter_metadata || ragConfig.filter_metadata || undefined,
+        min_similarity_score: req.body?.min_similarity_score !== undefined
+          ? Number(req.body.min_similarity_score)
+          : (ragConfig.min_similarity_score !== undefined ? Number(ragConfig.min_similarity_score) : 0.0),
+      };
+
+      const aiResponse = await fetch(`${AI_CORE_URL}/api/rag/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(searchPayload),
+      });
+
+      if (!aiResponse.ok) {
+        const errorData = await aiResponse.text();
+        await persistLog(aiResponse.status);
+        await persistExecution({ status: 'failed', errorMsg: errorData });
+        return res.status(aiResponse.status).json({ error: 'AI Core RAG Search Error', details: errorData });
+      }
+
+      const data = await aiResponse.json();
+      const docsCount = Array.isArray(data.results) ? data.results.length : (Array.isArray(data) ? data.length : 0);
+      const responseData = { status: 'success', ...data };
+      await persistLog(200);
+      await persistExecution({
+        status: 'success',
+        outputData: responseData,
+        resourcesUsed: { documents_found: docsCount, collection: searchPayload.collection }
+      });
+      return res.json(responseData);
+    }
+
+    // -------------------------------------------------------------------------
+    // PILIER 1 (STANDALONE) : Moteur Audio Pur (Speech-to-Text sans LLM forcé)
+    // -------------------------------------------------------------------------
+    const isExplicitComposite = candidateType === 'composite' || matchedEndpoint.type === 'composite' || req.body?.transcribe_and_analyze === true;
+    if ((candidateType === 'audio' || matchedEndpoint.type === 'audio' || req.body?.audio_base64) && !isExplicitComposite && candidateType !== 'standard') {
       let vocabularyTerms = [];
       let speakerRoles = undefined;
       if (matchedModule.configuration) {
@@ -168,12 +418,17 @@ router.all('/*', async (req, res) => {
         } catch (e) {}
       }
 
+      const audioConfig = await resolveAudioProviderConfig();
       const audioPayload = {
         audio_base64: req.body?.audio_base64,
         filename: req.body?.filename || 'audio.mp3',
         project_id: projectId,
         module_key: moduleKey,
         use_case_key: useCaseKey,
+        provider: audioConfig.provider,
+        model: audioConfig.model,
+        api_key: req.body?.api_key || audioConfig.apiKey,
+        endpoint_url: req.body?.endpoint_url || audioConfig.endpointUrl,
         language: req.body?.language || 'fr',
         vocabulary_terms: req.body?.vocabulary_terms || vocabularyTerms,
         enable_correction: req.body?.enable_correction !== false,
@@ -196,193 +451,359 @@ router.all('/*', async (req, res) => {
       }
 
       const data = await aiResponse.json();
+      const wordCount = data.structure?.word_count || (data.text ? data.text.split(/\s+/).filter(Boolean).length : 0);
+      const responseData = { status: 'success', ...data };
       await persistLog(200);
-      await persistExecution({ status: 'success', outputData: data, resourcesUsed: { audio_seconds: data.duration_seconds } });
-      return res.json(data);
+      await persistExecution({
+        status: 'success',
+        outputData: responseData,
+        resourcesUsed: { audio_seconds: data.duration_seconds || 0, duration_seconds: data.duration_seconds || 0, word_count: wordCount }
+      });
+      return res.json(responseData);
     }
 
-    // Support des endpoints NLP & Classification sémantique
-    if (matchedEndpoint.type === 'nlp_analysis' || matchedEndpoint.type === 'classification' || req.body?.taxonomy || (req.body?.text && req.body?.sensitive_keywords)) {
-      let modTaxonomy = undefined;
-      let modKeywords = [];
-      let modUrgencyLevels = undefined;
-      let modContextNature = undefined;
-      let modContextDef = undefined;
-
+    // -------------------------------------------------------------------------
+    // PILIERS COMPOSÉS : Audio ➔ LLM Orchestrator (Composite Chained Execution)
+    // -------------------------------------------------------------------------
+    if (isExplicitComposite || (req.body?.audio_base64 && candidateType === 'standard')) {
+      let vocabularyTerms = [];
+      let speakerRoles = undefined;
       if (matchedModule.configuration) {
         try {
           const modConf = JSON.parse(matchedModule.configuration);
-          if (modConf.taxonomy) modTaxonomy = modConf.taxonomy;
-          if (Array.isArray(modConf.sensitive_keywords)) modKeywords = modConf.sensitive_keywords;
-          if (Array.isArray(modConf.urgency_levels)) modUrgencyLevels = modConf.urgency_levels;
-          if (modConf.context_nature) modContextNature = modConf.context_nature;
-          if (modConf.context_definition) modContextDef = modConf.context_definition;
+          if (Array.isArray(modConf.vocabulary_terms)) vocabularyTerms = modConf.vocabulary_terms;
+          if (Array.isArray(modConf.speaker_roles)) speakerRoles = modConf.speaker_roles;
         } catch (e) {}
       }
 
-      const nlpPayload = {
-        text: req.body?.text || req.body?.texte || req.body?.content || '',
+      const audioConfig = await resolveAudioProviderConfig();
+      const audioPayload = {
+        audio_base64: req.body?.audio_base64,
+        filename: req.body?.filename || 'audio.mp3',
         project_id: projectId,
         module_key: moduleKey,
         use_case_key: useCaseKey,
-        taxonomy: req.body?.taxonomy || req.body?.categories_motifs || modTaxonomy,
-        sensitive_keywords: req.body?.sensitive_keywords || req.body?.mots_sensibles || modKeywords,
-        urgency_levels: req.body?.urgency_levels || modUrgencyLevels || ['MINEUR', 'MOYEN', 'GRAVE'],
-        context_nature: req.body?.context_nature || req.body?.nature_dossier || modContextNature || 'DOSSIER',
-        context_definition: req.body?.context_definition || req.body?.definition_nature || modContextDef || '',
-        enable_llm_reasoning: req.body?.enable_llm_reasoning !== false,
-        generate_summary: req.body?.generate_summary !== false,
-        summary_type: req.body?.summary_type || 'extractive',
-        max_summary_words: req.body?.max_summary_words || 50,
+        provider: audioConfig.provider,
+        model: audioConfig.model,
+        api_key: req.body?.api_key || audioConfig.apiKey,
+        endpoint_url: req.body?.endpoint_url || audioConfig.endpointUrl,
         language: req.body?.language || 'fr',
+        vocabulary_terms: req.body?.vocabulary_terms || vocabularyTerms,
+        enable_correction: req.body?.enable_correction !== false,
+        diarization: req.body?.diarization ?? Boolean(speakerRoles),
+        speaker_roles: req.body?.speaker_roles || speakerRoles,
+        custom_correction_prompt: req.body?.custom_correction_prompt,
       };
 
-      const aiResponse = await fetch(`${AI_CORE_URL}/api/nlp/analyze`, {
+      const audioResponse = await fetch(`${AI_CORE_URL}/api/audio/transcribe`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(nlpPayload),
+        body: JSON.stringify(audioPayload),
       });
 
-      if (!aiResponse.ok) {
-        const errorData = await aiResponse.text();
-        await persistLog(aiResponse.status);
-        await persistExecution({ status: 'failed', errorMsg: errorData });
-        return res.status(aiResponse.status).json({ error: 'AI Core NLP Error', details: errorData });
+      if (!audioResponse.ok) {
+        const errorData = await audioResponse.text();
+        await persistLog(audioResponse.status);
+        await persistExecution({ status: 'failed', errorMsg: `Transcription audio échouée: ${errorData}` });
+        return res.status(audioResponse.status).json({ error: 'AI Core Audio Error', details: errorData });
       }
 
-      const data = await aiResponse.json();
-      await persistLog(200);
-      await persistExecution({ status: 'success', outputData: data, resourcesUsed: { execution_time_ms: data.execution_time_ms } });
-      return res.json(data);
-    }
+      const audioData = await audioResponse.json();
+      const transcribedText = audioData.text || '';
 
-    // Support des endpoints RAG Résolution assistée
-    if (matchedEndpoint.type === 'rag_resolution' || req.body?.historical_collection || (matchedEndpoint.type === 'search' && (ragConfig.enabled || req.body?.query))) {
-      let modHistCol = undefined;
-      let modDocCol = undefined;
-      let modHistFilter = undefined;
-      let modDocFilter = undefined;
-      let modNumProps = undefined;
+      const compositeInput = {
+        ...req.body,
+        text: transcribedText,
+        transcribed_text: transcribedText,
+        transcription: transcribedText,
+        audio_duration: audioData.duration_seconds || 0,
+        audio_meta: {
+          duration_seconds: audioData.duration_seconds || 0,
+          speakers: audioData.speakers || [],
+          segments: audioData.segments || []
+        }
+      };
 
-      if (matchedModule.configuration) {
-        try {
-          const modConf = JSON.parse(matchedModule.configuration);
-          if (modConf.historical_collection) modHistCol = modConf.historical_collection;
-          if (modConf.documentary_collection) modDocCol = modConf.documentary_collection;
-          if (modConf.history_filter) modHistFilter = modConf.history_filter;
-          if (modConf.documentary_filter) modDocFilter = modConf.documentary_filter;
-          if (modConf.num_propositions) modNumProps = modConf.num_propositions;
-        } catch (e) {}
+      const userPrompt = Object.entries(compositeInput)
+        .filter(([key]) => key !== 'audio_base64')
+        .map(([key, value]) => `${key}: ${typeof value === 'object' ? JSON.stringify(value) : value ?? ''}`)
+        .join('\n');
+
+      if (ragConfig.enabled && !ragConfig.query) {
+        ragConfig.query = transcribedText || userPrompt;
       }
+      const requestOptions = {};
+      if (ragConfig.query) requestOptions.rag_query = ragConfig.query;
+      if (ragConfig.top_k !== undefined) requestOptions.top_k = ragConfig.top_k;
 
-      const ragResolvePayload = {
-        query: req.body?.query || req.body?.texte_actuel || req.body?.text || req.body?.texte || '',
-        project_id: projectId,
+      const executePayload = {
+        module_id: matchedModule.id,
         module_key: moduleKey,
         use_case_key: useCaseKey,
-        historical_collection: req.body?.historical_collection || ragConfig.collection || modHistCol,
-        documentary_collection: req.body?.documentary_collection || modDocCol,
-        top_k_history: req.body?.top_k_history || ragConfig.top_k || 3,
-        top_k_docs: req.body?.top_k_docs || 3,
-        min_similarity_score: req.body?.min_similarity_score,
-        history_filter: req.body?.history_filter || ragConfig.filter_metadata || modHistFilter,
-        documentary_filter: req.body?.documentary_filter || modDocFilter,
-        num_propositions: req.body?.num_propositions || modNumProps || 3,
-        system_role_instruction: req.body?.system_role_instruction,
-        custom_resolution_prompt: req.body?.custom_resolution_prompt,
-        target_solution_field: req.body?.target_solution_field,
-      };
-
-      const aiResponse = await fetch(`${AI_CORE_URL}/api/rag/resolve`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(ragResolvePayload),
-      });
-
-      if (!aiResponse.ok) {
-        const errorData = await aiResponse.text();
-        await persistLog(aiResponse.status);
-        await persistExecution({ status: 'failed', errorMsg: errorData });
-        return res.status(aiResponse.status).json({ error: 'AI Core RAG Error', details: errorData });
-      }
-
-      const data = await aiResponse.json();
-      await persistLog(200);
-      await persistExecution({ status: 'success', outputData: data, resourcesUsed: { propositions_count: data.propositions?.length, sources_count: data.sources_used?.length } });
-      return res.json(data);
-    }
-
-    // Support des endpoints Analytics & Text-to-Viz
-    if (matchedEndpoint.type === 'analytics' || matchedEndpoint.type === 'text_to_viz' || req.body?.dataset_schema || (req.body?.query && req.body?.records)) {
-      let modSchema = undefined;
-      if (matchedModule.configuration) {
-        try {
-          const modConf = JSON.parse(matchedModule.configuration);
-          if (modConf.dataset_schema) modSchema = modConf.dataset_schema;
-        } catch (e) {}
-      }
-
-      const analyticsPayload = {
-        query: req.body?.query || req.body?.question || '',
-        dataset_schema: req.body?.dataset_schema || modSchema || { fields: [] },
-        records: req.body?.records || req.body?.data || [],
+        module: moduleKey,
+        use_case: resolvedPromptName,
+        system_prompt_template: resolvedPromptInstructions,
+        user_prompt: userPrompt,
+        input: compositeInput,
+        variables: compositeInput,
+        request_options: requestOptions,
+        output_schema: outputSchema,
+        model_options: modelOptions,
+        rag_config: ragConfig,
         project_id: projectId,
-        module_key: moduleKey,
-        use_case_key: useCaseKey,
+        project_name: req.headers['x-project-name'] ? decodeURIComponent(req.headers['x-project-name']) : null,
+        input_reference: { ...req.body, audio_base64: '[AUDIO_BASE64_STREAM]' },
+        context_reference: {
+          base_de_donnees: Boolean(ragConfig.enabled),
+          historique: Boolean(ragConfig.historical_collection),
+          audio: true
+        }
       };
 
-      const aiResponse = await fetch(`${AI_CORE_URL}/api/analytics/chart`, {
+      const aiResponse = await fetch(`${AI_CORE_URL}/api/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(analyticsPayload),
+        body: JSON.stringify(executePayload),
       });
 
       if (!aiResponse.ok) {
         const errorData = await aiResponse.text();
         await persistLog(aiResponse.status);
-        await persistExecution({ status: 'failed', errorMsg: errorData });
-        return res.status(aiResponse.status).json({ error: 'AI Core Analytics Error', details: errorData });
+        await persistExecution({ status: 'failed', errorMsg: `Exécution LLM composite échouée: ${errorData}` });
+        return res.status(aiResponse.status).json({ error: 'AI Core LLM Error', details: errorData });
       }
 
-      const data = await aiResponse.json();
+      const executeData = await aiResponse.json();
+      let parsedResult = null;
+      try {
+        if (typeof executeData.result === 'string') {
+          parsedResult = JSON.parse(executeData.result);
+        } else if (typeof executeData.result === 'object' && executeData.result !== null) {
+          parsedResult = executeData.result;
+        }
+      } catch (_) {}
+
+      const combinedData = {
+        status: 'success',
+        ...(parsedResult && typeof parsedResult === 'object' ? parsedResult : {}),
+        ...executeData,
+        result: parsedResult || executeData.result,
+        audio_transcription: audioData,
+        transcription: audioData
+      };
+
+      const wordCount = audioData.structure?.word_count || transcribedText.split(/\s+/).filter(Boolean).length;
+      const combinedResources = {
+        audio_seconds: audioData.duration_seconds || 0,
+        word_count: wordCount,
+        ...(executeData.resources_used || {})
+      };
+
       await persistLog(200);
-      await persistExecution({ status: 'success', outputData: data, resourcesUsed: { chart_type: data.chart_type, row_count: data.raw_aggregations?.length } });
-      return res.json(data);
+      await persistExecution({ status: 'success', outputData: combinedData, resourcesUsed: combinedResources });
+      return res.json(combinedData);
     }
 
-    // 3. Préparer le payload pour l'AI Core
+    // -------------------------------------------------------------------------
+    // RÉTROCOMPATIBILITÉ LEGACY : Support des pipelines spécialisés GPR v1
+    // (Conserve 100% de conformité tant que le Use Case n'est pas déclaré "standard")
+    // -------------------------------------------------------------------------
+    if (matchedUseCase?.type !== 'standard') {
+      // Endpoint NLP & Classification sémantique legacy
+      if (matchedEndpoint.type === 'nlp_analysis' || matchedEndpoint.type === 'classification' || req.body?.taxonomy || (req.body?.text && req.body?.sensitive_keywords)) {
+        let modTaxonomy = undefined;
+        let modKeywords = [];
+        let modUrgencyLevels = undefined;
+        let modContextNature = undefined;
+        let modContextDef = undefined;
+
+        if (matchedModule.configuration) {
+          try {
+            const modConf = JSON.parse(matchedModule.configuration);
+            if (modConf.taxonomy) modTaxonomy = modConf.taxonomy;
+            if (Array.isArray(modConf.sensitive_keywords)) modKeywords = modConf.sensitive_keywords;
+            if (Array.isArray(modConf.urgency_levels)) modUrgencyLevels = modConf.urgency_levels;
+            if (modConf.context_nature) modContextNature = modConf.context_nature;
+            if (modConf.context_definition) modContextDef = modConf.context_definition;
+          } catch (e) {}
+        }
+
+        const nlpPayload = {
+          text: extractPrimaryTextField(req.body, inputSchema),
+          project_id: projectId,
+          module_key: moduleKey,
+          use_case_key: useCaseKey,
+          provider: resolvedProviderName,
+          model: resolvedModelName,
+          taxonomy: req.body?.taxonomy || req.body?.categories_motifs || modTaxonomy,
+          sensitive_keywords: req.body?.sensitive_keywords || req.body?.mots_sensibles || modKeywords,
+          urgency_levels: req.body?.urgency_levels || modUrgencyLevels || ['MINEUR', 'MOYEN', 'GRAVE'],
+          context_nature: req.body?.context_nature || req.body?.nature_dossier || modContextNature || 'DOSSIER',
+          context_definition: req.body?.context_definition || req.body?.definition_nature || modContextDef || '',
+          enable_llm_reasoning: req.body?.enable_llm_reasoning !== false,
+          generate_summary: req.body?.generate_summary !== false,
+          summary_type: req.body?.summary_type || 'extractive',
+          max_summary_words: req.body?.max_summary_words || 50,
+          language: req.body?.language || 'fr',
+        };
+
+        const aiResponse = await fetch(`${AI_CORE_URL}/api/nlp/analyze`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(nlpPayload),
+        });
+
+        if (!aiResponse.ok) {
+          const errorData = await aiResponse.text();
+          await persistLog(aiResponse.status);
+          await persistExecution({ status: 'failed', errorMsg: errorData });
+          return res.status(aiResponse.status).json({ error: 'AI Core NLP Error', details: errorData });
+        }
+
+        const data = await aiResponse.json();
+        await persistLog(200);
+        await persistExecution({ status: 'success', outputData: data, resourcesUsed: { execution_time_ms: data.execution_time_ms } });
+        return res.json(data);
+      }
+
+      // Endpoint RAG Résolution assistée legacy
+      if (matchedEndpoint.type === 'rag_resolution' || req.body?.historical_collection || (matchedEndpoint.type === 'search' && (ragConfig.enabled || req.body?.query))) {
+        let modHistCol = undefined;
+        let modDocCol = undefined;
+        let modHistFilter = undefined;
+        let modDocFilter = undefined;
+        let modNumProps = undefined;
+
+        if (matchedModule.configuration) {
+          try {
+            const modConf = JSON.parse(matchedModule.configuration);
+            if (modConf.historical_collection) modHistCol = modConf.historical_collection;
+            if (modConf.documentary_collection) modDocCol = modConf.documentary_collection;
+            if (modConf.history_filter) modHistFilter = modConf.history_filter;
+            if (modConf.documentary_filter) modDocFilter = modConf.documentary_filter;
+            if (modConf.num_propositions) modNumProps = modConf.num_propositions;
+          } catch (e) {}
+        }
+
+        const ragResolvePayload = {
+          query: req.body?.query || req.body?.texte_actuel || extractPrimaryTextField(req.body, inputSchema),
+          project_id: projectId,
+          module_key: moduleKey,
+          use_case_key: useCaseKey,
+          provider: resolvedProviderName,
+          model: resolvedModelName,
+          historical_collection: req.body?.historical_collection || ragConfig.collection || modHistCol,
+          documentary_collection: req.body?.documentary_collection || modDocCol,
+          top_k_history: req.body?.top_k_history || ragConfig.top_k || 3,
+          top_k_docs: req.body?.top_k_docs || 3,
+          min_similarity_score: req.body?.min_similarity_score,
+          history_filter: req.body?.history_filter || ragConfig.filter_metadata || modHistFilter,
+          documentary_filter: req.body?.documentary_filter || modDocFilter,
+          num_propositions: req.body?.num_propositions || modNumProps || 3,
+          system_role_instruction: req.body?.system_role_instruction,
+          custom_resolution_prompt: req.body?.custom_resolution_prompt,
+          target_solution_field: req.body?.target_solution_field,
+        };
+
+        const aiResponse = await fetch(`${AI_CORE_URL}/api/rag/resolve`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(ragResolvePayload),
+        });
+
+        if (!aiResponse.ok) {
+          const errorData = await aiResponse.text();
+          await persistLog(aiResponse.status);
+          await persistExecution({ status: 'failed', errorMsg: errorData });
+          return res.status(aiResponse.status).json({ error: 'AI Core RAG Error', details: errorData });
+        }
+
+        const data = await aiResponse.json();
+        await persistLog(200);
+        await persistExecution({ status: 'success', outputData: data, resourcesUsed: { propositions_count: data.propositions?.length, sources_count: data.sources_used?.length } });
+        return res.json(data);
+      }
+
+      // Endpoint Analytics & Text-to-Viz legacy
+      if (matchedEndpoint.type === 'analytics' || matchedEndpoint.type === 'text_to_viz' || req.body?.dataset_schema || (req.body?.query && req.body?.records)) {
+        let modSchema = undefined;
+        if (matchedModule.configuration) {
+          try {
+            const modConf = JSON.parse(matchedModule.configuration);
+            if (modConf.dataset_schema) modSchema = modConf.dataset_schema;
+          } catch (e) {}
+        }
+
+        const analyticsPayload = {
+          query: req.body?.query || req.body?.question || '',
+          dataset_schema: req.body?.dataset_schema || modSchema || { fields: [] },
+          records: req.body?.records || req.body?.data || [],
+          project_id: projectId,
+          module_key: moduleKey,
+          use_case_key: useCaseKey,
+          provider: resolvedProviderName,
+          model: resolvedModelName,
+        };
+
+        const aiResponse = await fetch(`${AI_CORE_URL}/api/analytics/chart`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(analyticsPayload),
+        });
+
+        if (!aiResponse.ok) {
+          const errorData = await aiResponse.text();
+          await persistLog(aiResponse.status);
+          await persistExecution({ status: 'failed', errorMsg: errorData });
+          return res.status(aiResponse.status).json({ error: 'AI Core Analytics Error', details: errorData });
+        }
+
+        const data = await aiResponse.json();
+        await persistLog(200);
+        await persistExecution({ status: 'success', outputData: data, resourcesUsed: { chart_type: data.chart_type, row_count: data.raw_aggregations?.length } });
+        return res.json(data);
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // PILIER 3 (UNIVERSEL) : Orchestrateur LLM Prompt-First & Context-Driven
+    // Endpoint cible : POST /api/execute
+    // -------------------------------------------------------------------------
     const userPrompt = Object.entries(req.body || {})
+      .filter(([key]) => key !== 'audio_base64')
       .map(([key, value]) => `${key}: ${typeof value === 'object' ? JSON.stringify(value) : value ?? ''}`)
       .join('\n');
-    if (ragConfig.enabled && !ragConfig.query) ragConfig.query = userPrompt;
+
+    if (ragConfig.enabled && !ragConfig.query) {
+      ragConfig.query = extractPrimaryTextField(req.body, inputSchema) || userPrompt;
+    }
     const requestOptions = {};
     if (ragConfig.query) requestOptions.rag_query = ragConfig.query;
     if (ragConfig.top_k !== undefined) requestOptions.top_k = ragConfig.top_k;
+
     const payload = {
-      // Contrat canonique : les identifiants et les donnees d'appel sont
-      // transmis separement de la configuration legacy conservee ci-dessous.
       module_id: matchedModule.id,
       module_key: moduleKey,
       use_case_key: useCaseKey,
-      input: req.body || {},
-      request_options: requestOptions,
-      module: moduleKey, // Utiliser la vraie clé métier du module
+      module: moduleKey,
       use_case: resolvedPromptName,
+      system_prompt_template: resolvedPromptInstructions,
       user_prompt: userPrompt,
-      variables: req.body, // On passe le body brut de la requête comme variables
+      input: req.body || {},
+      variables: req.body || {},
+      request_options: requestOptions,
       output_schema: outputSchema,
       model_options: modelOptions,
       rag_config: ragConfig,
-      project_id: req.headers['x-project-id'] || null,
+      project_id: projectId,
       project_name: req.headers['x-project-name'] ? decodeURIComponent(req.headers['x-project-name']) : null,
-      input_reference: req.body, // The input form data
+      input_reference: req.body,
       context_reference: {
-        "base_de_donnees": ragConfig.enabled,
-        "historique": false
+        base_de_donnees: Boolean(ragConfig.enabled),
+        historique: Boolean(ragConfig.historical_collection),
       }
     };
 
-    // 4. Envoyer à l'AI Core
     const aiResponse = await fetch(`${AI_CORE_URL}/api/execute`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -397,11 +818,28 @@ router.all('/*', async (req, res) => {
     }
 
     const data = await aiResponse.json();
+    let parsedResult = null;
+    try {
+      if (typeof data.result === 'string') {
+        parsedResult = JSON.parse(data.result);
+      } else if (typeof data.result === 'object' && data.result !== null) {
+        parsedResult = data.result;
+      }
+    } catch (_) {}
+
+    let finalData = data;
+    if (parsedResult && typeof parsedResult === 'object') {
+      finalData = {
+        status: 'success',
+        ...parsedResult,
+        ...data,
+        result: parsedResult,
+      };
+    }
+
     await persistLog(200);
-    await persistExecution({ status: 'success', outputData: data, resourcesUsed: data.resources_used || null });
-    
-    // 5. Retourner le résultat généré par l’IA au client
-    return res.json(data);
+    await persistExecution({ status: 'success', outputData: finalData, resourcesUsed: data.resources_used || null });
+    return res.json(finalData);
 
   } catch (error) {
     console.error('API Gateway Error:', error);
