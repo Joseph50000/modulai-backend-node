@@ -32,11 +32,44 @@ const daysAgo = (days) => new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
 const useCases = [
   {
     key: 'analyse-reclamation',
-    name: 'Analyse et qualification d’une réclamation',
-    description: 'Analyse le texte brut d’une réclamation bancaire, évalue l’urgence, détecte les mots clés sensibles et propose la catégorie.',
-    type: 'standard',
+    name: 'Analyse et qualification d’une réclamation (Pipeline)',
+    description: 'Pipeline séquentiel en 3 étapes : 1. Sévérité & Sentiment ➔ 2. Qualification Catégorie & Motif ➔ 3. Synthèse factuelle.',
+    type: 'pipeline',
+    output_strategy: 'merge_all',
     prompt_name: 'gpr:analyse-reclamation',
     rag_config: { enabled: false },
+    steps: [
+      {
+        id: 'evaluation',
+        name: 'Évaluation Sévérité & Sentiment',
+        system_prompt: 'Tu es un expert en relation client bancaire.\nAnalyse le message du client :\n"{{input.texte_plainte}}"\n\nÉvalue le sentiment parmi [positif, neutre, negatif, tres_negatif], le niveau d\'urgence parmi [MINEUR, MOYEN, GRAVE] et relève les mots sensibles critiques (avocat, BCEAO, justice, fraude, etc.).',
+        output_schema: [
+          { name: 'sentiment', type: 'string', required: true, description: 'positif, neutre, negatif, tres_negatif' },
+          { name: 'urgence', type: 'string', required: true, description: 'MINEUR, MOYEN ou GRAVE' },
+          { name: 'mots_sensibles_detectes', type: 'array', required: true, description: 'Mots critiques identifiés' },
+          { name: 'mots_cles_sensibles', type: 'array', required: false, description: 'Termes juridiques ou critiques' }
+        ]
+      },
+      {
+        id: 'qualification',
+        name: 'Qualification Catégorie & Motif',
+        system_prompt: 'Tu es le responsable de la qualification des réclamations bancaires.\nPlainte client : "{{input.texte_plainte}}"\n\nRésultats préalables de l\'évaluation :\n- Urgence qualifiée : {{steps.evaluation.urgence}}\n- Sentiment : {{steps.evaluation.sentiment}}\n\nEn tenant compte de cette sévérité et du contenu, détermine la catégorie bancaire principale et le motif précis.',
+        output_schema: [
+          { name: 'categorie_suggeree', type: 'string', required: true, description: 'Catégorie bancaire recommandée.' },
+          { name: 'motif_suggere', type: 'string', required: true, description: 'Motif précis identifié.' },
+          { name: 'score_risque', type: 'number', required: false, description: 'Score de risque de 0 à 100.' }
+        ]
+      },
+      {
+        id: 'synthese',
+        name: 'Synthèse Exécutive',
+        system_prompt: 'Rédige une synthèse factuelle en une phrase destinée au conseiller bancaire pour ce dossier classé en {{steps.qualification.categorie_suggeree}} avec urgence {{steps.evaluation.urgence}}.',
+        output_schema: [
+          { name: 'resume', type: 'string', required: true, description: 'Synthèse factuelle en une phrase.' },
+          { name: 'justification', type: 'string', required: false, description: 'Justification argumentée de la qualification.' }
+        ]
+      }
+    ],
     input_schema: [
       { name: 'texte_plainte', type: 'string', required: true, description: 'Contenu brut de la réclamation déposée par le client.' },
       { name: 'canal', type: 'string', required: false, description: 'Canal d’entrée (agence, mobile, web, courrier, téléphone).' },
