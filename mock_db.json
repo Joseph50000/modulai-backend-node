@@ -1,0 +1,23 @@
+{
+  "execute": [
+    {
+      "id": "execute_1791993050961",
+      "created_date": "2026-10-14T15:50:50.961Z",
+      "module": "rh_module",
+      "use_case": "screening-candidat",
+      "model": "qwen/qwen3.8-27b",
+      "provider": "Groq Cloud",
+      "user_prompt": "profil: Developpeur React Senior 5 ans experience",
+      "output_schema": [
+        {
+          "name": "decision",
+          "type": "string"
+        },
+        {
+          "name": "seniorite",
+          "type": "string"
+        }
+      ]
+    }
+  ]
+}
