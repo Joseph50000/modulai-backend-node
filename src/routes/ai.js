@@ -360,5 +360,66 @@ router.get('/sync/jobs', async (_req, res) => {
   }
 });
 
+router.post('/provider/test', async (req, res) => {
+  try {
+    const { endpoint_url, type, api_key } = req.body;
+    if (!endpoint_url) {
+      return res.status(400).json({ ok: false, message: 'URL endpoint manquante' });
+    }
+    const cleanUrl = endpoint_url.replace(/\/$/, '');
+    const isOllama = type === 'ollama' || type === 'local' || cleanUrl.includes('11434') || cleanUrl.includes('ollama');
+
+    if (isOllama) {
+      const testHeaders = { 'Content-Type': 'application/json' };
+      if (api_key) testHeaders['Authorization'] = `Bearer ${api_key}`;
+
+      try {
+        const respTags = await fetch(`${cleanUrl}/api/tags`, {
+          method: 'GET',
+          headers: testHeaders,
+          signal: AbortSignal.timeout(8000)
+        });
+        if (respTags.ok) {
+          const data = await respTags.json();
+          const count = data.models?.length || 0;
+          return res.json({ ok: true, message: `Connecté avec succès à Ollama. (${count} modèle(s) disponible(s))` });
+        }
+        if (respTags.status === 401) {
+          return res.json({ ok: false, message: 'Erreur 401 : Clé API Ollama invalide ou non autorisée' });
+        }
+      } catch (_) {}
+
+      const respVer = await fetch(`${cleanUrl}/api/version`, {
+        method: 'GET',
+        headers: testHeaders,
+        signal: AbortSignal.timeout(5000)
+      });
+      if (respVer.ok) {
+        const verData = await respVer.json();
+        return res.json({ ok: true, message: `Connecté avec succès. Version : ${verData.version || 'inconnue'}` });
+      }
+      return res.json({ ok: false, message: `Échec du test : HTTP ${respVer.status} ${respVer.statusText}` });
+    } else {
+      const testHeaders = { 'Content-Type': 'application/json' };
+      if (api_key) testHeaders['Authorization'] = `Bearer ${api_key}`;
+      const modelsUrl = cleanUrl.endsWith('/v1') ? `${cleanUrl}/models` : `${cleanUrl}/v1/models`;
+      const respModels = await fetch(modelsUrl, {
+        method: 'GET',
+        headers: testHeaders,
+        signal: AbortSignal.timeout(8000)
+      });
+      if (respModels.ok) {
+        return res.json({ ok: true, message: 'Connecté avec succès au Provider Cloud.' });
+      }
+      if (respModels.status === 401) {
+        return res.json({ ok: false, message: 'Erreur 401 : Clé API Cloud invalide ou non autorisée' });
+      }
+      return res.json({ ok: false, message: `Échec de connexion : HTTP ${respModels.status}` });
+    }
+  } catch (err) {
+    return res.json({ ok: false, message: `Impossible de se connecter : ${err.message}` });
+  }
+});
+
 export default router;
 

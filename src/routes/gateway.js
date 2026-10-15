@@ -1,10 +1,11 @@
 import express from 'express';
+import crypto from 'crypto';
 import { PrismaClient } from '@prisma/client';
 
 const router = express.Router();
 const prisma = new PrismaClient();
 
-const AI_CORE_URL = (process.env.AI_CORE_URL || 'http://localhost:8001').replace(/\/$/, '');
+const AI_CORE_URL = (process.env.AI_CORE_URL || 'http://127.0.0.1:8001').replace(/\/$/, '');
 
 /**
  * Extrait de façon agnostique le texte principal d'une requête
@@ -61,7 +62,7 @@ router.all('/*', async (req, res) => {
   const startedAt = Date.now();
   const method = req.method;
   const requestPath = req.params[0].replace(/^\/+|\/+$/g, '');
-  const projectId = req.headers['x-project-id'] || null;
+  let projectId = req.headers['x-project-id'] || null;
   const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   let matchedEndpoint = null;
   let matchedModule = null;
@@ -87,13 +88,39 @@ router.all('/*', async (req, res) => {
   let resolvedProviderName = null;
   let resolvedPromptName = null;
 
-  const persistExecution = async ({ status = 'success', outputData = null, errorMsg = null, configSnapshot = null, resourcesUsed = null, provider = null, model = null }) => {
+  const persistExecution = async ({
+    status = 'success',
+    outputData = null,
+    errorMsg = null,
+    configSnapshot = null,
+    resourcesUsed = null,
+    provider = null,
+    model = null,
+    humanValidation = null,
+    justification = null,
+    contextReference = null,
+  }) => {
     try {
       const duration = Date.now() - startedAt;
+      let projectName = req.headers['x-project-name'] ? decodeURIComponent(req.headers['x-project-name']) : null;
+      if (!projectName && projectId) {
+        try {
+          const proj = await prisma.project.findUnique({ where: { id: projectId }, select: { name: true } });
+          if (proj?.name) projectName = proj.name;
+        } catch (_) {}
+      }
+      const defaultValidation = configSnapshot?.human_validation_required
+        ? 'required'
+        : (status === 'success' ? 'pending' : 'none');
+
+      const defaultJustification = configSnapshot?.human_validation_required
+        ? 'Validation humaine requise par la policy'
+        : (status === 'success' ? 'En attente de justification humaine' : null);
+
       const createdExec = await prisma.aIExecution.create({
         data: {
           project_id: projectId,
-          project_name: req.headers['x-project-name'] ? decodeURIComponent(req.headers['x-project-name']) : null,
+          project_name: projectName,
           module_name: matchedModule?.module_key || matchedModule?.name || 'unknown',
           use_case: matchedEndpoint?.use_case_key || null,
           prompt_name: resolvedPromptName || matchedEndpoint?.use_case_key || null,
@@ -102,12 +129,15 @@ router.all('/*', async (req, res) => {
           model: model || resolvedModelName || null,
           status,
           execution_time: duration,
-          user_name: req.user?.username || req.user?.email || 'api-gateway',
+          user_name: req.headers['x-user-name'] || req.user?.username || req.user?.email || 'API User',
           error: errorMsg || null,
           input_reference: req.body ? JSON.stringify(req.body) : null,
           output: outputData ? (typeof outputData === 'string' ? outputData : JSON.stringify(outputData)) : null,
           configuration_snapshot: configSnapshot ? JSON.stringify(configSnapshot) : (matchedModule?.configuration || null),
-          resources_used: resourcesUsed ? JSON.stringify(resourcesUsed) : null,
+          resources_used: resourcesUsed ? (typeof resourcesUsed === 'string' ? resourcesUsed : JSON.stringify(resourcesUsed)) : null,
+          context_reference: contextReference ? (typeof contextReference === 'string' ? contextReference : JSON.stringify(contextReference)) : null,
+          human_validation: humanValidation || defaultValidation,
+          justification: justification || defaultJustification,
         },
       });
       if (createdExec?.id && !res.headersSent) {
@@ -117,7 +147,7 @@ router.all('/*', async (req, res) => {
         data: {
           action: 'DYNAMIC_AI_EXECUTION',
           project_id: projectId,
-          project_name: req.headers['x-project-name'] ? decodeURIComponent(req.headers['x-project-name']) : null,
+          project_name: projectName,
           module_id: matchedModule?.id || null,
           module_name: matchedModule?.module_key || matchedModule?.name || null,
           use_case: matchedEndpoint?.use_case_key || null,
@@ -134,9 +164,11 @@ router.all('/*', async (req, res) => {
 
   try {
 
-    // 1. Chercher un module actif qui expose cet endpoint
+    // 1. Chercher un module actif ou publié qui expose cet endpoint (exclut uniquement les modules archivés)
     const modules = await prisma.module.findMany({
-      where: { lifecycle: 'published' }
+      where: {
+        NOT: { lifecycle: 'archived' }
+      }
     });
 
     matchedEndpoint = null;
@@ -165,7 +197,121 @@ router.all('/*', async (req, res) => {
       return res.status(404).json({ error: 'Dynamic endpoint not found in any published module.' });
     }
 
-    // 2. Extraire la clé du Use Case
+    // Résolution automatique du project_id via le module si non fourni dans les en-têtes
+    if (!projectId && matchedModule?.id) {
+      try {
+        const linkedProject = await prisma.project.findFirst({
+          where: { modules: { contains: matchedModule.id } }
+        });
+        if (linkedProject) {
+          projectId = linkedProject.id;
+        }
+      } catch (_) {}
+    }
+
+    // 2. Contrôle de l'authentification et des autorisations
+    const isInternalRunner = req.headers['x-caller'] === 'modulai-internal-runner';
+    const authRequired = matchedEndpoint.auth_required !== false;
+    const authHeader = req.headers['authorization'] || '';
+    const apiKeyHeader = req.headers['x-api-key'] || '';
+    const rawApiKey = authHeader.startsWith('Bearer ')
+      ? authHeader.slice(7).trim()
+      : (apiKeyHeader.trim() || (authHeader ? authHeader.trim() : null));
+
+    let authenticatedKey = null;
+
+    if (isInternalRunner) {
+      // Exécution interne depuis la console d'administration ModulAI (UseCaseRunner)
+      // Aucun besoin de clé d'API développeur externe
+    } else if (rawApiKey) {
+      const keyHash = crypto.createHash('sha256').update(rawApiKey).digest('hex');
+
+      authenticatedKey = await prisma.apiKey.findFirst({
+        where: {
+          OR: [
+            { secret_hash: keyHash },
+            { secret_hash: rawApiKey }
+          ]
+        }
+      });
+
+      if (!authenticatedKey) {
+        await persistLog(401);
+        return res.status(401).json({
+          status: 'error',
+          error: 'Invalid API Key',
+          message: 'The provided API key is invalid or unrecognized.'
+        });
+      }
+
+      if (authenticatedKey.status && authenticatedKey.status !== 'active') {
+        await persistLog(403);
+        return res.status(403).json({
+          status: 'error',
+          error: 'API Key Revoked',
+          message: `The API key is currently ${authenticatedKey.status}.`
+        });
+      }
+
+      if (authenticatedKey.expires_at && new Date(authenticatedKey.expires_at) < new Date()) {
+        await persistLog(403);
+        return res.status(403).json({
+          status: 'error',
+          error: 'API Key Expired',
+          message: 'The provided API key has expired.'
+        });
+      }
+
+      // Vérification des scopes requis par l'endpoint
+      const requiredScopes = Array.isArray(matchedEndpoint.required_scopes)
+        ? matchedEndpoint.required_scopes
+        : [];
+
+      if (requiredScopes.length > 0) {
+        let keyScopes = [];
+        try {
+          keyScopes = typeof authenticatedKey.scopes === 'string'
+            ? JSON.parse(authenticatedKey.scopes)
+            : (Array.isArray(authenticatedKey.scopes) ? authenticatedKey.scopes : []);
+        } catch (_) {
+          keyScopes = String(authenticatedKey.scopes || '').split(',').map(s => s.trim()).filter(Boolean);
+        }
+
+        const hasRequiredScope = keyScopes.includes('*') ||
+          keyScopes.includes('admin') ||
+          keyScopes.includes('execute') ||
+          requiredScopes.some(rs => keyScopes.includes(rs));
+
+        if (!hasRequiredScope) {
+          await persistLog(403);
+          return res.status(403).json({
+            status: 'error',
+            error: 'Forbidden',
+            message: `API Key does not possess the required scopes: [${requiredScopes.join(', ')}]. Granted: [${keyScopes.join(', ')}].`
+          });
+        }
+      }
+
+      if (!projectId && authenticatedKey.project_id) {
+        projectId = authenticatedKey.project_id;
+      }
+
+      // Mise à jour asynchrone du dernier usage
+      prisma.apiKey.update({
+        where: { id: authenticatedKey.id },
+        data: { last_used_at: new Date() }
+      }).catch(err => console.error('Error updating apiKey last_used_at:', err));
+
+    } else if (authRequired) {
+      await persistLog(401);
+      return res.status(401).json({
+        status: 'error',
+        error: 'Unauthorized',
+        message: 'Missing API Key. Please provide a valid API Key via Authorization: Bearer <key> or x-api-key header.'
+      });
+    }
+
+    // 3. Extraire la clé du Use Case
     const useCaseKeyFull = matchedEndpoint.use_case_key; // ex: "gpr:analyse-plainte"
     if (!useCaseKeyFull) {
       await persistLog(400);
@@ -183,6 +329,8 @@ router.all('/*', async (req, res) => {
     let outputSchema = null;
     let inputSchema = null;
     let useCaseRagConfig = {};
+    let useCaseSteps = null;
+    let useCaseOutputStrategy = 'merge_all';
     
     if (matchedModule.use_cases) {
       try {
@@ -198,6 +346,17 @@ router.all('/*', async (req, res) => {
           if (uc.input_schema && uc.input_schema.length > 0) {
             inputSchema = uc.input_schema;
           }
+          if (Array.isArray(uc.steps)) {
+            useCaseSteps = uc.steps;
+          }
+          if (uc.configuration) {
+            try {
+              const parsedConf = typeof uc.configuration === 'string' ? JSON.parse(uc.configuration) : uc.configuration;
+              if (Array.isArray(parsedConf.steps)) useCaseSteps = parsedConf.steps;
+              if (parsedConf.output_strategy) useCaseOutputStrategy = parsedConf.output_strategy;
+            } catch (_) {}
+          }
+          if (uc.output_strategy) useCaseOutputStrategy = uc.output_strategy;
         }
       } catch (e) {}
     }
@@ -277,9 +436,10 @@ router.all('/*', async (req, res) => {
       }
     }
 
+    let matchedAiModel = null;
     if (modelOptions.model) {
       try {
-        const matchedAiModel = await prisma.aiModel.findFirst({
+        matchedAiModel = await prisma.aiModel.findFirst({
           where: {
             OR: [
               { id: modelOptions.model },
@@ -288,7 +448,9 @@ router.all('/*', async (req, res) => {
             ]
           }
         });
-        if (matchedAiModel?.name) {
+        if (matchedAiModel?.model_id) {
+          resolvedModelName = matchedAiModel.model_id;
+        } else if (matchedAiModel?.name) {
           resolvedModelName = matchedAiModel.name;
         } else {
           resolvedModelName = modelOptions.model;
@@ -317,6 +479,15 @@ router.all('/*', async (req, res) => {
       } catch (_) {
         resolvedProviderName = modelOptions.provider;
       }
+    } else if (matchedAiModel?.provider_id) {
+      try {
+        matchedAiProvider = await prisma.aiProvider.findUnique({
+          where: { id: matchedAiModel.provider_id }
+        });
+        if (matchedAiProvider?.name) {
+          resolvedProviderName = matchedAiProvider.name;
+        }
+      } catch (_) {}
     } else {
       try {
         matchedAiProvider = (await prisma.aiProvider.findFirst({ where: { is_default: true } })) || (await prisma.aiProvider.findFirst());
@@ -557,7 +728,8 @@ router.all('/*', async (req, res) => {
           base_de_donnees: Boolean(ragConfig.enabled),
           historique: Boolean(ragConfig.historical_collection),
           audio: true
-        }
+        },
+        delegate_audit: true,
       };
 
       const aiResponse = await fetch(`${AI_CORE_URL}/api/execute`, {
@@ -600,7 +772,15 @@ router.all('/*', async (req, res) => {
       };
 
       await persistLog(200);
-      await persistExecution({ status: 'success', outputData: combinedData, resourcesUsed: combinedResources });
+      await persistExecution({
+        status: 'success',
+        outputData: combinedData,
+        resourcesUsed: combinedResources,
+        contextReference: executePayload.context_reference,
+        provider: executeData.resolved_configuration?.provider?.name || null,
+        model: executeData.resolved_configuration?.model?.name || null,
+        configSnapshot: executeData.resolved_configuration || null,
+      });
       return res.json(combinedData);
     }
 
@@ -608,7 +788,7 @@ router.all('/*', async (req, res) => {
     // RÉTROCOMPATIBILITÉ LEGACY : Support des pipelines spécialisés GPR v1
     // (Conserve 100% de conformité tant que le Use Case n'est pas déclaré "standard")
     // -------------------------------------------------------------------------
-    if (matchedUseCase?.type !== 'standard') {
+    if (matchedUseCase?.type !== 'standard' && matchedUseCase?.type !== 'pipeline' && !req.body?.steps && !useCaseSteps) {
       // Endpoint NLP & Classification sémantique legacy
       if (matchedEndpoint.type === 'nlp_analysis' || matchedEndpoint.type === 'classification' || req.body?.taxonomy || (req.body?.text && req.body?.sensitive_keywords)) {
         let modTaxonomy = undefined;
@@ -791,6 +971,8 @@ router.all('/*', async (req, res) => {
       user_prompt: userPrompt,
       input: req.body || {},
       variables: req.body || {},
+      steps: req.body?.steps || useCaseSteps || undefined,
+      output_strategy: req.body?.output_strategy || useCaseOutputStrategy || 'merge_all',
       request_options: requestOptions,
       output_schema: outputSchema,
       model_options: modelOptions,
@@ -801,7 +983,8 @@ router.all('/*', async (req, res) => {
       context_reference: {
         base_de_donnees: Boolean(ragConfig.enabled),
         historique: Boolean(ragConfig.historical_collection),
-      }
+      },
+      delegate_audit: true,
     };
 
     const aiResponse = await fetch(`${AI_CORE_URL}/api/execute`, {
@@ -811,13 +994,35 @@ router.all('/*', async (req, res) => {
     });
 
     if (!aiResponse.ok) {
-      const errorData = await aiResponse.text();
+      const errorText = await aiResponse.text();
+      let errorMsg = errorText;
+      try {
+        const parsed = JSON.parse(errorText);
+        errorMsg = parsed.detail || parsed.message || parsed.error || errorText;
+      } catch (_) {}
       await persistLog(aiResponse.status);
-      await persistExecution({ status: 'failed', errorMsg: errorData });
-      return res.status(aiResponse.status).json({ error: 'AI Core Error', details: errorData });
+      await persistExecution({ status: 'failed', errorMsg });
+      return res.status(aiResponse.status).json({
+        status: 'error',
+        error: errorMsg,
+        message: errorMsg,
+      });
     }
 
     const data = await aiResponse.json();
+
+    if (data.status === 'error') {
+      const errorMsg = data.message || data.error || 'Erreur d’exécution IA';
+      await persistLog(502);
+      await persistExecution({ status: 'failed', errorMsg });
+      return res.status(502).json({
+        status: 'error',
+        error: errorMsg,
+        message: errorMsg,
+        ...data,
+      });
+    }
+
     let parsedResult = null;
     try {
       if (typeof data.result === 'string') {
@@ -829,6 +1034,12 @@ router.all('/*', async (req, res) => {
 
     let finalData = data;
     if (parsedResult && typeof parsedResult === 'object') {
+      if (data.pipeline_metrics && !parsedResult.pipeline_metrics) {
+        parsedResult.pipeline_metrics = data.pipeline_metrics;
+      }
+      if (data.steps_detail && !parsedResult.steps_detail) {
+        parsedResult.steps_detail = data.steps_detail;
+      }
       finalData = {
         status: 'success',
         ...parsedResult,
@@ -837,8 +1048,28 @@ router.all('/*', async (req, res) => {
       };
     }
 
+    const cleanOutput = (parsedResult !== null && parsedResult !== undefined)
+      ? parsedResult
+      : (data.result !== undefined ? data.result : finalData);
+
+    const combinedExecutionResources = {
+      ...(data.resources_used || {}),
+      ...(data.pipeline_metrics ? { pipeline: data.pipeline_metrics } : {}),
+      ...(data.execution_time_ms ? { inference_time_ms: data.execution_time_ms } : {}),
+    };
+
     await persistLog(200);
-    await persistExecution({ status: 'success', outputData: finalData, resourcesUsed: data.resources_used || null });
+    await persistExecution({
+      status: 'success',
+      outputData: finalData,
+      resourcesUsed: Object.keys(combinedExecutionResources).length > 0 ? combinedExecutionResources : null,
+      provider: data.resolved_configuration?.provider?.name || null,
+      model: data.resolved_configuration?.model?.name || null,
+      configSnapshot: data.resolved_configuration || null,
+      contextReference: payload.context_reference,
+      humanValidation: data.resolved_configuration?.human_validation_required ? 'required' : 'pending',
+      justification: data.resolved_configuration?.human_validation_required ? 'Validation humaine requise par la policy' : 'En attente de justification humaine',
+    });
     return res.json(finalData);
 
   } catch (error) {

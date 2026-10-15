@@ -13,16 +13,22 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Le frontend est servi par WebDev sur un sous-domaine manus.computer.
-// Autoriser uniquement les origines de démonstration attendues et les environnements locaux.
-app.use(cors({
-  origin(origin, callback) {
-    if (!origin || /(^https?:\/\/localhost(?::\d+)?$)|(^https?:\/\/127\.0\.0\.1(?::\d+)?$)|(^https:\/\/[^/]+\.manus(?:pre)?\.computer$)/.test(origin)) {
-      return callback(null, true);
-    }
-    return callback(new Error('Origin not allowed by ModulAI CORS policy'));
-  },
-  credentials: true,
-}));
+// Autoriser uniquement les origines de démonstration attendues et les environnements locaux pour l'admin interne.
+// Les routes /api/dynamic appliquent strictement la policy CORS par projet.
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api/dynamic')) {
+    return next();
+  }
+  return cors({
+    origin(origin, callback) {
+      if (!origin || /(^https?:\/\/localhost(?::\d+)?$)|(^https?:\/\/127\.0\.0\.1(?::\d+)?$)|(^https:\/\/[^/]+\.manus(?:pre)?\.computer$)/.test(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error('Origin not allowed by ModulAI CORS policy'));
+    },
+    credentials: true,
+  })(req, res, next);
+});
 
 // Les routes dynamiques appliquent la policy CORS du projet ciblé.
 app.use(express.json({ limit: process.env.RAG_UPLOAD_LIMIT || '50mb' }));
@@ -43,6 +49,6 @@ app.use('/api/dynamic', projectCors, gatewayRoutes);
 // Generic CRUD API (doit être en dernier pour ne pas intercepter les autres)
 app.use('/api', entityRoutes);
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log("Serveur Backend Node.js démarré sur http://localhost:" + PORT);
 });
