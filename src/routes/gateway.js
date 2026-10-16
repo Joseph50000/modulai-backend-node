@@ -528,7 +528,7 @@ router.all('/*', async (req, res) => {
         provider: audioProvider?.name || resolvedProviderName,
         model: audioModel || resolvedModelName,
         apiKey: audioProvider?.api_key || audioProvider?.secret_hash || undefined,
-        endpointUrl: audioProvider?.endpoint_url || undefined,
+        endpointUrl: audioProvider?.endpoint_url?.includes('/audio/transcriptions') ? audioProvider.endpoint_url : undefined,
       };
     };
 
